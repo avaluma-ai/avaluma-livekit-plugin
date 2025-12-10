@@ -248,8 +248,37 @@ class AvalumaRuntime:
         """
         Cleanup resources
         Called automatically by C++ destructor, but can be called explicitly
+
+        This properly shuts down the C++ runtime and ensures all threads are stopped.
         """
-        pass
+        print("⚠️  AvalumaRuntime.cleanup() CALLED")
+        # import traceback
+        # print("Cleanup called from:")
+        # traceback.print_stack()
+
+        try:
+            # Stop the C++ runtime synchronously in the render executor thread
+            if hasattr(self, "_cpp_runtime") and self._cpp_runtime:
+                print("Cleaning up AvalumaRuntime - calling stop()...")
+
+                # Submit stop to the executor to ensure it runs in the same thread
+                # that created the EGL context
+                future = _render_executor.submit(self._cpp_runtime.stop)
+                print("Waiting for stop() to complete...")
+                future.result(timeout=1.0)  # Wait max 1 second
+                print("stop() completed")
+
+                # Give the C++ runtime a moment to finish cleanup
+                import time
+
+                time.sleep(0.5)  # Increased to 500ms
+
+                print("✓ AvalumaRuntime cleanup complete")
+            else:
+                print("⚠️  No _cpp_runtime to cleanup")
+        except Exception as e:
+            print(f"❌ Error during AvalumaRuntime cleanup: {e}")
+            traceback.print_exc()
 
     def __repr__(self):
         return f"<AvalumaRuntime: {self._cpp_runtime}>"
