@@ -90,6 +90,7 @@ class AvatarSession:
         self._http_session: aiohttp.ClientSession | None = None
         self._avatar_runner: AvatarRunner | None = None
         self._runtime = None
+        self._session_id: str | None = None
 
     async def start(
         self,
@@ -222,6 +223,18 @@ class AvatarSession:
 
         logger.debug("starting avatar session")
         await self._request_remote_avatar_to_join(livekit_url, livekit_token, room.name)
+
+        # Register shutdown callback to stop remote avatar
+        try:
+            job_ctx = get_job_context()
+
+            async def _on_shutdown() -> None:
+                await self.stop()
+
+            job_ctx.add_shutdown_callback(_on_shutdown)
+        except RuntimeError:
+            pass
+
         agent_session.output.audio = DataStreamAudioOutput(
             room=room,
             destination_identity=self._avatar_participant_identity,
@@ -267,6 +280,19 @@ class AvatarSession:
                             status_code=response.status,
                             body=text,
                         )
+
+                    # Try to get session_id from response
+                    try:
+                        response_data = await response.json()
+                        self._session_id = response_data.get("session_id")
+                        if self._session_id:
+                            logger.debug(
+                                f"Remote avatar session started: {self._session_id}"
+                            )
+                    except Exception:
+                        # Response might not be JSON, that's ok
+                        pass
+
                     return
 
             except Exception as e:
@@ -290,8 +316,58 @@ class AvatarSession:
 
         return self._http_session
 
+    async def stop(self) -> None:
+        """Stop the avatar session and cleanup resources."""
+        if self._mode == "remote" and self._session_id:
+            await self._request_remote_avatar_to_stop()
+
+        if self._runtime:
+            self._runtime.cleanup()
+            self._runtime = None
+
+    async def _request_remote_avatar_to_stop(self) -> None:
+        """Request the remote avatar to leave the room."""
+        if not self._session_id:
+            return
+
+        if not self._avaluma_hvi_server_url:
+            logger.warning("Cannot stop remote avatar: hvi_server_url not set")
+            return
+
+        # Build stop URL from start URL
+        stop_url = self._avaluma_hvi_server_url.replace("/start-avatar", "/stop-avatar")
+
+        logger.debug(f"Stopping remote avatar session: {self._session_id}")
+
+        try:
+            async with self._ensure_http_session().post(
+                stop_url,
+                headers={
+                    "Content-Type": "application/json",
+                    "api-secret": self._license_key,
+                },
+                json={"session_id": self._session_id},
+                timeout=aiohttp.ClientTimeout(sock_connect=5.0),
+            ) as response:
+                if not response.ok:
+                    text = await response.text()
+                    logger.warning(
+                        f"Failed to stop remote avatar: {response.status} - {text}"
+                    )
+                else:
+                    logger.debug("Remote avatar session stopped successfully")
+        except Exception as e:
+            logger.warning(f"Error stopping remote avatar: {e}")
+        finally:
+            self._session_id = None
+
     @property
     def runtime(self) -> AvalumaRuntime:
         if self._runtime is None:
             raise AvalumaException("Runtime not initialized")
         return self._runtime
+
+    @property
+    def session_id(self) -> str | None:
+        """Get the current session ID (remote mode only)."""
+        return self._session_id
