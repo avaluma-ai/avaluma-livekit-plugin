@@ -151,20 +151,23 @@ class AvalumaVideoGenerator(VideoGenerator):
                         )
                     yield audio_frame
 
-            if frame.end_of_speech:
-                # Flush remaining buffered frames before EOS
-                while video_buffer:
-                    if AV_SYNC_DEBUG:
-                        print(f"[AV_DEBUG] flush_video: {len(video_buffer)} remaining")
-                    yield video_buffer.popleft()
-                while audio_buffer:
-                    if AV_SYNC_DEBUG:
-                        print(f"[AV_DEBUG] flush_audio: {len(audio_buffer)} remaining")
-                    yield audio_buffer.popleft()
+        # FIX: Only yield AudioSegmentEnd ONCE after the C++ loop ends (returns None)
+        # Previously this was inside the loop, causing multiple EOS markers
+        # because C++ sets end_of_speech=True on EVERY frame after flush()
 
-                if AV_SYNC_DEBUG:
-                    print(f"[AV_DEBUG] emit_eos: wall={time.perf_counter():.3f}s")
-                yield AudioSegmentEnd()
+        # Flush remaining buffered frames
+        while video_buffer:
+            if AV_SYNC_DEBUG:
+                print(f"[AV_DEBUG] flush_video: {len(video_buffer)} remaining")
+            yield video_buffer.popleft()
+        while audio_buffer:
+            if AV_SYNC_DEBUG:
+                print(f"[AV_DEBUG] flush_audio: {len(audio_buffer)} remaining")
+            yield audio_buffer.popleft()
+
+        if AV_SYNC_DEBUG:
+            print(f"[AV_DEBUG] emit_eos: wall={time.perf_counter():.3f}s")
+        yield AudioSegmentEnd()
 
     async def stop(self) -> None:
         await self._runtime.stop()
