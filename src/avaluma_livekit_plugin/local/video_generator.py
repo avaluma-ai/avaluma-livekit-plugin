@@ -39,7 +39,7 @@ class AvalumaVideoGenerator(VideoGenerator):
             return
 
         if frame.sample_rate == 48000:
-            print("Resampling audio from 48kHz to 16kHz")
+            # print("Resampling audio from 48kHz to 16kHz")
             for resampled_frame in self._audio_resampler.push(frame):
                 await self._runtime.push_audio(
                     bytes(resampled_frame.data),
