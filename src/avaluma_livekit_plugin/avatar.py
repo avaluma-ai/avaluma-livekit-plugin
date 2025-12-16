@@ -2,14 +2,8 @@ from __future__ import annotations, print_function
 
 import asyncio
 import os
-import sys
-from collections.abc import AsyncGenerator, AsyncIterator
-from pickle import FRAME
-from re import A
-from typing import TYPE_CHECKING, Literal
 
 import aiohttp
-from aiohttp.client_exceptions import SSLContext
 from livekit import api, rtc
 from livekit.agents import (
     DEFAULT_API_CONNECT_OPTIONS,
@@ -30,13 +24,108 @@ from livekit.agents.voice.avatar import (
 )
 
 from .local.avatar_cpp_wrapper import AvalumaRuntime
-
-# from PIL import Image
 from .log import logger
+from .utils import delete_all_ingress_for_room, mute_track_for_user
 
 
 class AvalumaException(Exception):
     """Exception for Avaluma errors"""
+
+
+class LocalAvatarSession:
+    def __init__(self, license_key: str, avatar_id: str, assets_dir: str):
+        # TODO: check if local/bin is not empty
+        if not os.path.exists(os.path.join(os.path.dirname(__file__), "local/bin")):
+            raise AvalumaException("local/bin directory not found")
+
+        asset_path = os.path.join(assets_dir, f"{avatar_id}.hvia")
+
+        kwargs = {
+            "license_key": license_key,
+            "avatar_id": avatar_id,
+            "asset_path": asset_path,
+        }
+
+        from .local.avatar_cpp_wrapper import AvalumaRuntime
+
+        self._runtime = AvalumaRuntime(**kwargs)
+        self._audio_buffer = QueueAudioOutput(
+            sample_rate=self._runtime.settings.INPUT_SAMPLE_RATE
+        )
+
+    async def start(
+        self, room: rtc.Room, agent_session: NotGivenOr[AgentSession] = NOT_GIVEN
+    ) -> None:
+        from .local.video_generator import AvalumaVideoGenerator
+
+        video_generator = AvalumaVideoGenerator(self._runtime)
+
+        output_width, output_height = video_generator.video_resolution
+        avatar_options = AvatarOptions(
+            video_width=output_width,
+            video_height=output_height,
+            video_fps=video_generator.video_fps,
+            audio_sample_rate=video_generator.audio_sample_rate,
+            audio_channels=1,
+        )
+
+        # create avatar runner
+        from .local.avatar_runner import AvalumaAvatarRunner
+
+        self._avatar_runner = AvalumaAvatarRunner(
+            room=room,
+            video_gen=video_generator,
+            audio_recv=self._audio_buffer,
+            options=avatar_options,
+        )
+        await self._avatar_runner.start()
+
+        if agent_session:
+            agent_session.output.audio = self._audio_buffer
+
+        def on_track_subscribed(
+            track: rtc.Track,
+            publication: rtc.TrackPublication,
+            participant: rtc.RemoteParticipant,
+        ):
+            """Synchronous callback, starts an async task to process the audio."""
+            if (
+                track.kind == rtc.TrackKind.KIND_AUDIO
+                and participant.identity == "external-agent-ingress"
+            ):
+                logger.info(
+                    f"Subscribed to ingress audio track from {participant.identity}, starting processor task."
+                )
+                asyncio.create_task(mute_track_for_user(track, room))
+                # Cast is safe due to the kind check above
+                asyncio.create_task(self.process_ingress_track(track))  # type: ignore
+
+        room.on("track_subscribed", on_track_subscribed)
+
+        try:
+            job_ctx = get_job_context()
+
+            async def _on_shutdown() -> None:
+                self._runtime.cleanup()
+                await delete_all_ingress_for_room(room)
+
+            job_ctx.add_shutdown_callback(_on_shutdown)
+        except RuntimeError:
+            logger.error("Failed to register shutdown callback")
+            pass
+
+    async def stop(self):
+        await self._runtime.stop()
+
+    async def process_ingress_track(self, track: rtc.AudioTrack):
+        """Process audio frames from the ingress track and push them to the avatar."""
+        audio_stream = rtc.AudioStream(track)
+        async for frame_event in audio_stream:
+            frame = frame_event.frame
+            # print(
+            #     f"SampleRate: {frame.sample_rate}, Channels: {frame.num_channels}, SamplesPerChannel: {frame.samples_per_channel}, Length: {len(frame.data)}"
+            # )
+            await self._audio_buffer.capture_frame(frame)
 
 
 class AvatarSession:
@@ -132,7 +221,7 @@ class AvatarSession:
 
         runtime = self._runtime
 
-        from .local import AvalumaVideoGenerator
+        from .local.video_generator import AvalumaVideoGenerator
 
         video_generator = AvalumaVideoGenerator(runtime)
 

@@ -2,7 +2,7 @@
 Avaluma plugin for LiveKit Agents
 """
 
-from .avatar import AvalumaException, AvatarSession
+from .avatar import AvalumaException, AvatarSession, LocalAvatarSession
 from .local.avatar_cpp_wrapper import AvalumaRuntime
 from .local.avatar_runner import AvalumaAvatarRunner
 from .local.video_generator import AvalumaVideoGenerator
@@ -14,6 +14,7 @@ __all__ = [
     "AvalumaRuntime",
     "AvalumaVideoGenerator",
     "AvatarSession",
+    "LocalAvatarSession",
     "__version__",
 ]
 
