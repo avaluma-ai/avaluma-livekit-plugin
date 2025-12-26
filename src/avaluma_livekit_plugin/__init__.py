@@ -2,12 +2,13 @@
 Avaluma plugin for LiveKit Agents
 """
 
-from .avatar import AvalumaException, AvatarSession
+from .avatar import AvalumaException, AvatarSession, LocalAvatarSession
 from .version import __version__
 
 __all__ = [
     "AvalumaException",
     "AvatarSession",
+    "LocalAvatarSession",
     "__version__",
 ]
 

@@ -4,16 +4,16 @@ from collections import deque
 from collections.abc import AsyncGenerator, AsyncIterator
 
 import numpy as np
+from livekit import rtc
 from livekit.agents import utils
 from livekit.agents.voice.avatar import (
     AudioSegmentEnd,
     VideoGenerator,
 )
 
-from livekit import rtc
+from .avatar_cpp_wrapper import AV_SYNC_DEBUG, AvatarSession
 
 logger = logging.getLogger(__name__)
-from .avatar_cpp_wrapper import AV_SYNC_DEBUG, AvalumaRuntime
 
 # =============================================================================
 # A/V Sync Debug: Frame offset for testing synchronization
@@ -31,32 +31,32 @@ AV_SYNC_OFFSET = 0
 
 
 class AvalumaVideoGenerator(VideoGenerator):
-    def __init__(self, runtime: AvalumaRuntime):
-        self._runtime = runtime
+    def __init__(self, session: AvatarSession):
+        self._session = session
 
     @property
     def video_resolution(self) -> tuple[int, int]:
-        return self._runtime.settings.WIDTH, self._runtime.settings.HEIGHT
+        return self._session.settings.WIDTH, self._session.settings.HEIGHT
 
     @property
     def video_fps(self) -> int:
-        return self._runtime.settings.FPS  # type: ignore
+        return self._session.settings.FPS  # type: ignore
 
     @property
     def audio_sample_rate(self) -> int:
-        return self._runtime.settings.INPUT_SAMPLE_RATE  # type: ignore
+        return self._session.settings.INPUT_SAMPLE_RATE  # type: ignore
 
     @utils.log_exceptions(logger=logger)
     async def push_audio(self, frame: rtc.AudioFrame | AudioSegmentEnd) -> None:
         if isinstance(frame, AudioSegmentEnd):
-            await self._runtime.flush()
+            await self._session.flush()
             return
-        await self._runtime.push_audio(
+        await self._session.push_audio(
             bytes(frame.data), frame.sample_rate, last_chunk=False
         )
 
     def clear_buffer(self) -> None:
-        self._runtime.interrupt()
+        self._session.interrupt()
 
     def __aiter__(
         self,
@@ -88,7 +88,7 @@ class AvalumaVideoGenerator(VideoGenerator):
         if offset != 0:
             logger.info(f"A/V Sync Debug: Using frame offset {offset} ({offset * 40}ms)")
 
-        async for frame in self._runtime.run():
+        async for frame in self._session.run():
             # Convert timestamp from microseconds to seconds (for AVSynchronizer)
             timestamp_s = frame.timestamp_us / 1_000_000.0
 
@@ -170,4 +170,4 @@ class AvalumaVideoGenerator(VideoGenerator):
         yield AudioSegmentEnd()
 
     async def stop(self) -> None:
-        await self._runtime.stop()
+        await self._session.stop()

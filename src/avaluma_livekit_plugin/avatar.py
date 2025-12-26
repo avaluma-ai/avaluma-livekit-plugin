@@ -2,14 +2,8 @@ from __future__ import annotations, print_function
 
 import asyncio
 import os
-import sys
-from collections.abc import AsyncGenerator, AsyncIterator
-from pickle import FRAME
-from re import A
-from typing import TYPE_CHECKING, Literal
 
 import aiohttp
-from aiohttp.client_exceptions import SSLContext
 from livekit import api, rtc
 from livekit.agents import (
     DEFAULT_API_CONNECT_OPTIONS,
@@ -29,7 +23,7 @@ from livekit.agents.voice.avatar import (
     QueueAudioOutput,
 )
 
-from .local.avatar_cpp_wrapper import AvalumaRuntime
+from .local.avatar_cpp_wrapper import AvalumaRuntime, AvatarSession as CppAvatarSession
 
 # from PIL import Image
 from .log import logger
@@ -37,6 +31,81 @@ from .log import logger
 
 class AvalumaException(Exception):
     """Exception for Avaluma errors"""
+
+
+class LocalAvatarSession:
+    """
+    Simplified avatar session for local mode only.
+
+    This is a convenience wrapper around AvatarSession that:
+    - Only supports local mode (no remote server)
+    - Has a simpler constructor (no mode/hvi_server_url params)
+    - Provides a cleaner start() signature
+
+    Usage:
+        avatar = LocalAvatarSession(
+            license_key="...",
+            avatar_id="my-avatar",
+            assets_dir="/path/to/avatars",
+        )
+        await avatar.start(agent_session=session, room=ctx.room)
+    """
+
+    def __init__(
+        self,
+        *,
+        license_key: NotGivenOr[str] = NOT_GIVEN,
+        avatar_id: NotGivenOr[str] = NOT_GIVEN,
+        assets_dir: NotGivenOr[str] = NOT_GIVEN,
+    ) -> None:
+        """
+        Initialize a local avatar session.
+
+        Args:
+            license_key: The Avaluma License Key (or AVALUMA_LICENSE_KEY env).
+            avatar_id: The avatar ID to use.
+            assets_dir: Directory containing avatar assets (or AVALUMA_ASSETS_DIR env).
+        """
+        # Defer creation of AvatarSession until we verify it will work
+        self._license_key = license_key
+        self._avatar_id = avatar_id
+        self._assets_dir = assets_dir
+        self._session: AvatarSession | None = None
+
+    async def start(
+        self,
+        agent_session: AgentSession,
+        room: rtc.Room,
+    ) -> None:
+        """
+        Start the local avatar session.
+
+        Args:
+            agent_session: The LiveKit agent session
+            room: The LiveKit room
+        """
+        # Create the underlying AvatarSession on first start
+        if self._session is None:
+            self._session = AvatarSession(
+                license_key=self._license_key,
+                avatar_id=self._avatar_id,
+                assets_dir=self._assets_dir,
+                mode="local",
+            )
+
+        await self._session.start(agent_session, room)
+
+    @property
+    def session(self):
+        """Access the underlying C++ avatar session."""
+        if self._session is None:
+            raise AvalumaException("Session not started - call start() first")
+        return self._session.session
+
+    @property
+    def runtime(self):
+        """Access the singleton AvalumaRuntime."""
+        return AvalumaRuntime()
 
 
 class AvatarSession:
@@ -89,7 +158,7 @@ class AvatarSession:
 
         self._http_session: aiohttp.ClientSession | None = None
         self._avatar_runner: AvatarRunner | None = None
-        self._runtime = None
+        self._cpp_session: CppAvatarSession | None = None
 
     async def start(
         self,
@@ -114,32 +183,30 @@ class AvatarSession:
             raise AvalumaException(f"Invalid mode: {self._mode}")
 
     async def _start_local(self, agent_session: AgentSession, room: rtc.Room) -> None:
-        if not self._runtime:
+        if not self._cpp_session:
             if self._assets_dir is None:
                 raise ValueError("assets_dir is not set")
 
             asset_path = os.path.join(self._assets_dir, f"{self._avatar_id}.hvia")
 
-            kwargs = {
-                "license_key": self._license_key,
-                "avatar_id": self._avatar_id,
-                "asset_path": asset_path,
-            }
-            self._runtime = AvalumaRuntime(**kwargs)
+            # Get singleton runtime and create session for this avatar
+            runtime = AvalumaRuntime()
+            self._cpp_session = runtime.create_session(asset_path=asset_path)
+            logger.info(f"Created avatar session: {self._cpp_session.session_id}")
         else:
-            logger.info("Avaluma runtime already initialized")
+            logger.info("Avatar session already initialized")
 
-        runtime = self._runtime
+        session = self._cpp_session
 
         from .local import AvalumaVideoGenerator
 
-        video_generator = AvalumaVideoGenerator(runtime)
+        video_generator = AvalumaVideoGenerator(session)
 
         try:
             job_ctx = get_job_context()
 
             async def _on_shutdown() -> None:
-                runtime.cleanup()
+                session.cleanup()
 
             job_ctx.add_shutdown_callback(_on_shutdown)
         except RuntimeError:
@@ -154,7 +221,7 @@ class AvatarSession:
             audio_channels=1,
         )
 
-        audio_buffer = QueueAudioOutput(sample_rate=runtime.settings.INPUT_SAMPLE_RATE)
+        audio_buffer = QueueAudioOutput(sample_rate=session.settings.INPUT_SAMPLE_RATE)
         # create avatar runner
         from .local.avatar_runner import AvalumaAvatarRunner
 
@@ -289,7 +356,13 @@ class AvatarSession:
         return self._http_session
 
     @property
+    def session(self) -> CppAvatarSession:
+        """Get the underlying C++ avatar session."""
+        if self._cpp_session is None:
+            raise AvalumaException("Session not initialized - call start() first")
+        return self._cpp_session
+
+    @property
     def runtime(self) -> AvalumaRuntime:
-        if self._runtime is None:
-            raise AvalumaException("Runtime not initialized")
-        return self._runtime
+        """Get the singleton AvalumaRuntime."""
+        return AvalumaRuntime()

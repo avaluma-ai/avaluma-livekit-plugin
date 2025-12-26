@@ -1,16 +1,41 @@
 """
 C++ Wrapper for AvalumaRuntime - LiveKit Integration
 
-This wrapper provides an async interface around the C++ avaluma_runtime module,
-making it compatible with LiveKit's async/await patterns.
+Architecture:
+- AvalumaRuntime (singleton) - ONE shared C++ runtime
+- AvatarSession (per-avatar) - session for a specific avatar
+
+The C++ runtime uses a multi-session architecture:
+1. AvalumaRuntime() - singleton, creates ONE C++ runtime
+2. runtime.create_session(asset_path, ...) - returns AvatarSession
+3. session.push_audio(...) - push audio for animation
+4. session.run() - async generator yielding frames
+5. session.destroy() - cleanup
+
+Usage:
+    # Get singleton runtime
+    runtime = AvalumaRuntime()
+
+    # Create sessions for different avatars
+    session1 = runtime.create_session("/path/to/avatar1.hvia")
+    session2 = runtime.create_session("/path/to/avatar2.hvia")
+
+    # Use sessions independently
+    await session1.push_audio(audio_bytes, 16000)
+    async for frame in session1.run():
+        ...
 """
 
 import asyncio
+import os
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Optional
 
 import numpy as np
+
+from ..log import logger
 
 # A/V Sync Debug Flag - set to True to enable detailed timing logs
 AV_SYNC_DEBUG = False
@@ -32,13 +57,16 @@ class AudioChunk:
     def __repr__(self):
         return f"<AudioChunk: {self.num_samples} samples @ {self.sample_rate} Hz>"
 
+    def __bool__(self):
+        return self.bytes is not None and len(self.bytes) > 0
+
 
 class Frame:
     """Frame wrapper (compatible with existing LiveKit code)"""
 
     def __init__(
         self,
-        audio_chunk: AudioChunk,
+        audio_chunk: Optional[AudioChunk],
         bgr_image: np.ndarray,
         end_of_speech: bool,
         timestamp_us: int = 0,
@@ -54,22 +82,23 @@ class Frame:
         self.duration_us = duration_us  # Frame duration (40ms for 25 FPS)
 
     def __repr__(self):
+        audio_info = f"{len(self.audio_chunk.bytes)} bytes" if self.audio_chunk else "no audio"
         return (
             f"<Frame: image={self.bgr_image.shape}, "
-            f"audio={len(self.audio_chunk.bytes)} bytes, "
+            f"audio={audio_info}, "
             f"EOS={self.end_of_speech}, "
             f"ts={self.timestamp_us}us, frame#{self.frame_number}>"
         )
 
 
 class AvalumaRuntimeSettings:
-    """Runtime settings (populated from C++ runtime)"""
+    """Runtime settings (passed as constructor params in new API)"""
 
-    def __init__(self, cpp_runtime):
-        self.FPS = cpp_runtime.fps
-        self.INPUT_SAMPLE_RATE = cpp_runtime.input_sample_rate
-        self.HEIGHT = cpp_runtime.height
-        self.WIDTH = cpp_runtime.width
+    def __init__(self, fps: int = 25, sample_rate: int = 48000, width: int = 512, height: int = 640):
+        self.FPS = fps
+        self.INPUT_SAMPLE_RATE = sample_rate
+        self.HEIGHT = height
+        self.WIDTH = width
 
     def __repr__(self):
         return (
@@ -80,55 +109,118 @@ class AvalumaRuntimeSettings:
 
 class AvalumaRuntime:
     """
-    Python wrapper around C++ AvalumaRuntime
-    Provides async interface for LiveKit integration
+    Singleton wrapper around the C++ AvalumaRuntime.
+
+    There is only ONE runtime, which manages multiple avatar sessions.
+    Use create_session() to create sessions for different avatars.
     """
 
-    def __init__(self, **kwargs):
-        """
-        Initialize AvalumaRuntime
+    _instance = None
+    _lock = threading.Lock()
 
-        Args:
-            license_key: License key string (required)
-            avatar_id: Avatar ID (optional, currently unused)
-            asset_path: Path to avatar assets directory (required)
-            render_width: Render width in pixels (optional, default 512)
-            render_height: Render height in pixels (optional, default 640)
-            fps: Frames per second (optional, default 25)
-        """
-        # Validate required parameters
-        if "asset_path" not in kwargs:
-            raise ValueError("asset_path is required")
+    def __new__(cls):
+        if cls._instance is None:
+            with cls._lock:
+                # Double-check locking
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+                    cls._instance._initialized = False
+        return cls._instance
 
-        # Create C++ config
+    def __init__(self):
+        if self._initialized:
+            return
+
         from . import avaluma_runtime
 
-        config = avaluma_runtime.RuntimeConfig()
-        config.asset_path = kwargs["asset_path"]
-        config.license_key = kwargs.get("license_key", "")
+        module_dir = os.path.dirname(avaluma_runtime.__file__)
+        logger.info(f"AvalumaRuntime: C++ module at {module_dir}")
+        logger.info("AvalumaRuntime: Creating singleton (RAII)")
 
-        # Optional rendering parameters
-        if "render_width" in kwargs:
-            config.render_width = kwargs["render_width"]
-        if "render_height" in kwargs:
-            config.render_height = kwargs["render_height"]
-        if "fps" in kwargs:
-            config.fps = kwargs["fps"]
+        self._cpp_runtime = avaluma_runtime.AvalumaRuntime()
+        self._initialized = True
 
-        # Create C++ runtime
-        print(f"Creating AvalumaRuntime: {config}")
-        self._cpp_runtime = avaluma_runtime.AvalumaRuntime(config)
+        logger.info("AvalumaRuntime: Singleton initialized")
 
-        # Initialize
-        print("Initializing C++ runtime...")
-        if not self._cpp_runtime.initialize():
-            raise RuntimeError("Failed to initialize C++ AvalumaRuntime")
+    def create_session(
+        self,
+        asset_path: str,
+        width: int = 512,
+        height: int = 640,
+        fps: int = 25,
+        sample_rate: int = 48000,
+    ) -> "AvatarSession":
+        """
+        Create a new session for an avatar.
 
-        print("✓ AvalumaRuntime initialized successfully")
+        Args:
+            asset_path: Path to avatar asset directory (e.g., '/path/to/kadda.hvia')
+            width: Render width in pixels (default: 512)
+            height: Render height in pixels (default: 640)
+            fps: Frames per second (default: 25)
+            sample_rate: Audio sample rate in Hz (default: 48000)
 
-        # Populate settings
-        self.settings = AvalumaRuntimeSettings(self._cpp_runtime)
-        print(f"  Settings: {self.settings}")
+        Returns:
+            AvatarSession object for the created session
+        """
+        logger.info(f"Creating session for: {asset_path}")
+        session_id = self._cpp_runtime.create_session(
+            asset_path=asset_path,
+            width=width,
+            height=height,
+            fps=fps,
+            sample_rate=sample_rate,
+        )
+        logger.info(f"Session created: {session_id}")
+        return AvatarSession(self._cpp_runtime, session_id, width, height, fps, sample_rate)
+
+    def get_session_count(self) -> int:
+        """Get number of active sessions."""
+        return self._cpp_runtime.get_session_count()
+
+    def get_session_ids(self) -> list:
+        """Get all active session IDs."""
+        return self._cpp_runtime.get_session_ids()
+
+    def has_session(self, session_id: str) -> bool:
+        """Check if a session exists."""
+        return self._cpp_runtime.has_session(session_id)
+
+    def __repr__(self):
+        return f"<AvalumaRuntime: {self.get_session_count()} active sessions>"
+
+
+class AvatarSession:
+    """
+    Represents a single avatar session on the shared runtime.
+
+    Each session is tied to ONE avatar (.hvia file).
+    Multiple sessions can exist on the same runtime.
+    """
+
+    def __init__(
+        self,
+        cpp_runtime,
+        session_id: str,
+        width: int,
+        height: int,
+        fps: int,
+        sample_rate: int,
+    ):
+        self._cpp_runtime = cpp_runtime
+        self._session_id = session_id
+        self.settings = AvalumaRuntimeSettings(
+            fps=fps,
+            sample_rate=sample_rate,
+            width=width,
+            height=height,
+        )
+        logger.info(f"AvatarSession created: {session_id}, settings: {self.settings}")
+
+    @property
+    def session_id(self) -> str:
+        """Get the session ID."""
+        return self._session_id
 
     async def push_audio(self, byte_data, sample_rate, last_chunk=False):
         """
@@ -136,7 +228,7 @@ class AvalumaRuntime:
 
         Args:
             byte_data: Raw PCM audio bytes (int16, mono)
-            sample_rate: Sample rate (should be 16000)
+            sample_rate: Sample rate (should match session sample rate)
             last_chunk: Whether this is the last chunk (triggers flush if True)
         """
         # A/V Sync Debug: Log audio push timing
@@ -154,6 +246,7 @@ class AvalumaRuntime:
         await loop.run_in_executor(
             _render_executor,
             self._cpp_runtime.push_audio,
+            self._session_id,
             bytes(byte_data),
             sample_rate,
         )
@@ -172,7 +265,7 @@ class AvalumaRuntime:
             Frame: Combined audio + video frame
 
         Example:
-            async for frame in runtime.run():
+            async for frame in session.run():
                 # Send frame.bgr_image to video track
                 # Send frame.audio_chunk.bytes to audio track
                 if frame.end_of_speech:
@@ -188,10 +281,11 @@ class AvalumaRuntime:
                 cpp_frame = await loop.run_in_executor(
                     _render_executor,
                     self._cpp_runtime.get_next_frame,
+                    self._session_id,
                     40,  # 40ms timeout (matches frame duration @ 25 FPS)
                 )
             except Exception as e:
-                print(f"Error getting frame: {e}")
+                logger.error(f"Error getting frame: {e}")
                 break
 
             if cpp_frame is None:
@@ -202,22 +296,26 @@ class AvalumaRuntime:
                 consecutive_none_count += 1
 
                 if consecutive_none_count >= max_none_retries:
-                    print(f"Timeout: No frames after {max_none_retries} retries (30s)")
+                    logger.warning(f"Timeout: No frames after {max_none_retries} retries (30s)")
                     break  # Really stopped or timeout
 
                 # Wait for audio or next retry (don't spam C++ with requests)
-                await asyncio.sleep(0.039)  # 50ms between retries
+                await asyncio.sleep(0.039)  # ~40ms between retries
                 continue  # Try again
 
             # Reset none counter - we got a frame!
             consecutive_none_count = 0
 
-            # Wrap C++ frame in Python objects
-            audio_chunk = AudioChunk(
-                cpp_frame.audio_chunk.bytes,
-                cpp_frame.audio_chunk.num_samples,
-                cpp_frame.audio_chunk.sample_rate,
-            )
+            # Wrap C++ audio chunk in Python object (may be empty)
+            cpp_audio = cpp_frame.audio_chunk
+            if cpp_audio and cpp_audio.bytes:
+                audio_chunk = AudioChunk(
+                    cpp_audio.bytes,
+                    cpp_audio.num_samples,
+                    cpp_audio.sample_rate,
+                )
+            else:
+                audio_chunk = None
 
             frame = Frame(
                 audio_chunk,
@@ -231,15 +329,16 @@ class AvalumaRuntime:
             # A/V Sync Debug: Log frame output timing
             if AV_SYNC_DEBUG:
                 frame_wall_time = time.perf_counter()
+                audio_info = f"{audio_chunk.num_samples} samples" if audio_chunk else "no audio"
                 print(
                     f"[AV_DEBUG] get_frame: wall={frame_wall_time:.3f}s, "
                     f"ts={frame.timestamp_us}us ({frame.timestamp_us / 1e6:.3f}s), "
-                    f"frame#{frame.frame_number}, eos={frame.end_of_speech}"
+                    f"frame#{frame.frame_number}, {audio_info}, eos={frame.end_of_speech}"
                 )
             # Legacy SYNC_DEBUG: Log every 1000th frame
             elif frame.frame_number % 1000 == 0:
-                print(
-                    f"SYNC_DEBUG: Python yielding frame #{frame.frame_number}, "
+                logger.debug(
+                    f"Python yielding frame #{frame.frame_number}, "
                     f"timestamp={frame.timestamp_us}us ({frame.timestamp_us / 1e6:.3f}s), "
                     f"end_of_speech={frame.end_of_speech}"
                 )
@@ -248,33 +347,48 @@ class AvalumaRuntime:
 
     async def flush(self):
         """
-        Signal end of speech
-        The next generated frame will have end_of_speech=True
+        Signal end of speech.
+        The next generated frame will have end_of_speech=True.
         """
         loop = asyncio.get_event_loop()
-        await loop.run_in_executor(_render_executor, self._cpp_runtime.flush)
+        await loop.run_in_executor(
+            _render_executor,
+            self._cpp_runtime.flush,
+            self._session_id,
+        )
 
     async def stop(self):
-        """Stop frame generation"""
+        """Stop frame generation by destroying the session."""
         loop = asyncio.get_event_loop()
-        await loop.run_in_executor(_render_executor, self._cpp_runtime.stop)
+        await loop.run_in_executor(
+            _render_executor,
+            self._cpp_runtime.destroy_session,
+            self._session_id,
+        )
 
     def interrupt(self):
         """
-        Clear audio buffers and reset to neutral pose (synchronous)
-        This is typically called when the user interrupts the avatar
+        Clear audio buffers and reset to neutral pose (synchronous).
+        This is typically called when the user interrupts the avatar.
         """
-        self._cpp_runtime.interrupt()
+        self._cpp_runtime.interrupt(self._session_id)
+
+    def destroy(self):
+        """Destroy this session and release its resources."""
+        if self._cpp_runtime.has_session(self._session_id):
+            self._cpp_runtime.destroy_session(self._session_id)
+            logger.info(f"AvatarSession destroyed: {self._session_id}")
 
     def cleanup(self):
-        """
-        Cleanup resources
-        Called automatically by C++ destructor, but can be called explicitly
-        """
-        pass
+        """Alias for destroy() for backwards compatibility."""
+        self.destroy()
 
     def __repr__(self):
-        return f"<AvalumaRuntime: {self._cpp_runtime}>"
+        return f"<AvatarSession: {self._session_id}>"
+
+
+# Backwards compatibility: LocalAvatarSession alias
+LocalAvatarSession = AvatarSession
 
 
 # Example usage
@@ -282,17 +396,21 @@ if __name__ == "__main__":
     import sys
 
     async def test_basic_flow():
-        """Test basic audio → frame flow"""
+        """Test basic audio -> frame flow"""
 
-        # Create runtime
-        runtime = AvalumaRuntime(
-            license_key="test_key",
+        # Get singleton runtime
+        runtime = AvalumaRuntime()
+        print(f"Runtime: {runtime}")
+
+        # Create session for avatar
+        session = runtime.create_session(
+            asset_path="/path/to/avatar.hvia",
         )
+        print(f"\nSession created: {session}")
+        print(f"Settings: {session.settings}")
 
-        print(f"\nRuntime created: {runtime.settings}")
-
-        # Generate test audio (1 second @ 16kHz sine wave)
-        sample_rate = 16000
+        # Generate test audio (1 second @ 48kHz sine wave)
+        sample_rate = 48000
         duration = 1.0
         num_samples = int(sample_rate * duration)
 
@@ -304,21 +422,22 @@ if __name__ == "__main__":
 
         # Push audio
         print("\nPushing audio...")
-        await runtime.push_audio(audio_bytes, sample_rate, last_chunk=False)
+        await session.push_audio(audio_bytes, sample_rate, last_chunk=False)
 
         # Generate frames
         print("\nGenerating frames...")
         frame_count = 0
 
-        async for frame in runtime.run():
+        async for frame in session.run():
             frame_count += 1
             print(f"Frame {frame_count}: {frame}")
 
             if frame_count >= 25:  # 1 second worth of frames
                 break
 
-        await runtime.stop()
-        print(f"\n✓ Generated {frame_count} frames successfully")
+        session.destroy()
+        print(f"\n Ã Generated {frame_count} frames successfully")
+        print(f"Runtime session count: {runtime.get_session_count()}")
 
     # Run test
     try:
