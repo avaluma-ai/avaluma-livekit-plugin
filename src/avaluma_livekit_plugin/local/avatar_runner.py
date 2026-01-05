@@ -95,7 +95,7 @@ class AvalumaAvatarRunner(AvatarRunner):
                 sync_time = time.perf_counter()
                 frame_type = "V" if isinstance(frame, rtc.VideoFrame) else "A"
                 ts_str = f"{timestamp_s:.3f}s" if timestamp_s else "None"
-                print(
+                logger.debug(
                     f"[AV_DEBUG] av_sync.push: wall={sync_time:.3f}s, "
                     f"type={frame_type}, ts={ts_str}"
                 )

@@ -3,11 +3,21 @@ Avaluma plugin for LiveKit Agents
 """
 
 from .avatar import AvalumaException, AvatarSession
+from .resources import (
+    InsufficientResourcesError,
+    ResourceMonitor,
+    ResourceStatus,
+    ResourceThresholds,
+)
 from .version import __version__
 
 __all__ = [
     "AvalumaException",
     "AvatarSession",
+    "InsufficientResourcesError",
+    "ResourceMonitor",
+    "ResourceStatus",
+    "ResourceThresholds",
     "__version__",
 ]
 

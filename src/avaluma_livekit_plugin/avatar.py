@@ -33,6 +33,7 @@ from .local.avatar_cpp_wrapper import AvalumaRuntime
 
 # from PIL import Image
 from .log import logger
+from .resources import InsufficientResourcesError, ResourceMonitor, ResourceThresholds
 
 
 class AvalumaException(Exception):
@@ -48,6 +49,10 @@ class AvatarSession:
         assets_dir: NotGivenOr[str] = NOT_GIVEN,
         hvi_server_url: NotGivenOr[str] = NOT_GIVEN,
         mode: str = "local",
+        min_free_ram_gb: NotGivenOr[float] = NOT_GIVEN,
+        min_free_vram_gb: NotGivenOr[float] = NOT_GIVEN,
+        gpu_device_id: NotGivenOr[int] = NOT_GIVEN,
+        check_resources: bool = True,
     ) -> None:
         """
         Initialize a Avaluma avatar session.
@@ -55,6 +60,13 @@ class AvatarSession:
         Args:
             license_key: The Avaluma License Key.
             avatar_id: The avatar ID to use.
+            assets_dir: Path to avatar assets directory (for local mode).
+            hvi_server_url: URL of the HVI server (for remote mode).
+            mode: Operating mode ("local" or "remote").
+            min_free_ram_gb: Minimum free RAM required in GB (default from env or 2.0).
+            min_free_vram_gb: Minimum free VRAM required in GB (default from env or 4.0).
+            gpu_device_id: GPU device index for VRAM monitoring (default from env or 0).
+            check_resources: Whether to check resources before starting (default True).
         """
         self._license_key = license_key or os.getenv("AVALUMA_LICENSE_KEY")
         self._avatar_id = avatar_id
@@ -64,6 +76,7 @@ class AvatarSession:
         )
         self._mode = mode
         self._conn_options = DEFAULT_API_CONNECT_OPTIONS
+        self._check_resources = check_resources
 
         if self._license_key is None:
             raise AvalumaException("`license_key` or AVALUMA_LICENSE_KEY are required")
@@ -91,6 +104,25 @@ class AvatarSession:
         self._avatar_runner: AvatarRunner | None = None
         self._runtime = None
 
+        # Initialize resource monitor if enabled
+        self._resource_monitor: ResourceMonitor | None = None
+        if self._check_resources:
+            logger.info(f"Initializing resource monitor for avatar_id='{self._avatar_id}'")
+            thresholds = ResourceThresholds()
+            if min_free_ram_gb is not NOT_GIVEN:
+                thresholds.min_free_ram_gb = min_free_ram_gb
+            if min_free_vram_gb is not NOT_GIVEN:
+                thresholds.min_free_vram_gb = min_free_vram_gb
+            if gpu_device_id is not NOT_GIVEN:
+                thresholds.gpu_device_id = gpu_device_id
+            self._resource_monitor = ResourceMonitor(thresholds)
+            logger.info(
+                f"Resource monitor initialized with thresholds: "
+                f"RAM>={thresholds.min_free_ram_gb}GB, VRAM>={thresholds.min_free_vram_gb}GB"
+            )
+        else:
+            logger.info(f"Resource monitoring is disabled for avatar_id='{self._avatar_id}' (check_resources=False)")
+
     async def start(
         self,
         agent_session: AgentSession,
@@ -114,6 +146,40 @@ class AvatarSession:
             raise AvalumaException(f"Invalid mode: {self._mode}")
 
     async def _start_local(self, agent_session: AgentSession, room: rtc.Room) -> None:
+        logger.info(f"Starting local avatar session for avatar_id='{self._avatar_id}'")
+
+        # Check resources before starting
+        if self._check_resources and self._resource_monitor:
+            logger.info("Performing resource check...")
+            try:
+                status = self._resource_monitor.check_resources()
+                result_msg = f"Resource check passed: RAM={status.available_ram_gb:.2f}GB"
+                if status.available_vram_gb is not None:
+                    result_msg += f", VRAM={status.available_vram_gb:.2f}GB (GPU: {status.gpu_name})"
+                logger.info(result_msg)
+            except InsufficientResourcesError as e:
+                error_msg = f"Cannot create avatar '{self._avatar_id}': {e}"
+                logger.error(error_msg)
+
+                # Communicate error to frontend via participant attributes (if room is connected)
+                try:
+                    if room.isconnected():
+                        await room.local_participant.set_attributes(
+                            {
+                                "error": "insufficient_resources",
+                                "error_message": str(e),
+                                "available_vram_gb": str(e.available_vram_gb or ""),
+                                "required_vram_gb": str(e.required_vram_gb or ""),
+                                "available_ram_gb": str(e.available_ram_gb or ""),
+                                "required_ram_gb": str(e.required_ram_gb or ""),
+                            }
+                        )
+                except Exception as attr_error:
+                    logger.warning(f"Could not set participant attributes: {attr_error}")
+
+                logger.error(error_msg, exc_info=True)
+                raise
+
         if not self._runtime:
             if self._assets_dir is None:
                 raise ValueError("assets_dir is not set")

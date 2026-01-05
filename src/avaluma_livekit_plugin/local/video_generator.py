@@ -102,7 +102,7 @@ class AvalumaVideoGenerator(VideoGenerator):
                         delayed_video = video_buffer.popleft()
                         if AV_SYNC_DEBUG:
                             emit_time = time.perf_counter()
-                            print(
+                            logger.debug(
                                 f"[AV_DEBUG] emit_video (delayed +{offset}): wall={emit_time:.3f}s"
                             )
                         yield delayed_video
@@ -110,7 +110,7 @@ class AvalumaVideoGenerator(VideoGenerator):
                     # Zero or negative offset: Yield video immediately
                     if AV_SYNC_DEBUG:
                         emit_time = time.perf_counter()
-                        print(
+                        logger.debug(
                             f"[AV_DEBUG] emit_video: wall={emit_time:.3f}s, "
                             f"ts={timestamp_s:.3f}s, frame#{frame.frame_number}"
                         )
@@ -134,7 +134,7 @@ class AvalumaVideoGenerator(VideoGenerator):
                         delayed_audio = audio_buffer.popleft()
                         if AV_SYNC_DEBUG:
                             emit_time = time.perf_counter()
-                            print(
+                            logger.debug(
                                 f"[AV_DEBUG] emit_audio (delayed {offset}): wall={emit_time:.3f}s"
                             )
                         yield delayed_audio
@@ -145,7 +145,7 @@ class AvalumaVideoGenerator(VideoGenerator):
                         audio_dur_ms = (
                             audio_chunk.num_samples / audio_chunk.sample_rate * 1000
                         )
-                        print(
+                        logger.debug(
                             f"[AV_DEBUG] emit_audio: wall={emit_time:.3f}s, "
                             f"ts={timestamp_s:.3f}s, dur={audio_dur_ms:.1f}ms"
                         )
@@ -158,15 +158,15 @@ class AvalumaVideoGenerator(VideoGenerator):
         # Flush remaining buffered frames
         while video_buffer:
             if AV_SYNC_DEBUG:
-                print(f"[AV_DEBUG] flush_video: {len(video_buffer)} remaining")
+                logger.debug(f"[AV_DEBUG] flush_video: {len(video_buffer)} remaining")
             yield video_buffer.popleft()
         while audio_buffer:
             if AV_SYNC_DEBUG:
-                print(f"[AV_DEBUG] flush_audio: {len(audio_buffer)} remaining")
+                logger.debug(f"[AV_DEBUG] flush_audio: {len(audio_buffer)} remaining")
             yield audio_buffer.popleft()
 
         if AV_SYNC_DEBUG:
-            print(f"[AV_DEBUG] emit_eos: wall={time.perf_counter():.3f}s")
+            logger.debug(f"[AV_DEBUG] emit_eos: wall={time.perf_counter():.3f}s")
         yield AudioSegmentEnd()
 
     async def stop(self) -> None:
