@@ -1,5 +1,3 @@
-from .video_generator import AvalumaVideoGenerator
-
 """
 Auto-configure library paths for avaluma_runtime C++ module
 """

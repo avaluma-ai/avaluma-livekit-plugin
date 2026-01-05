@@ -4,13 +4,12 @@ from collections import deque
 from collections.abc import AsyncGenerator, AsyncIterator
 
 import numpy as np
+from livekit import rtc
 from livekit.agents import utils
 from livekit.agents.voice.avatar import (
     AudioSegmentEnd,
     VideoGenerator,
 )
-
-from livekit import rtc
 
 logger = logging.getLogger(__name__)
 from .avatar_cpp_wrapper import AV_SYNC_DEBUG, AvalumaRuntime
@@ -33,6 +32,9 @@ AV_SYNC_OFFSET = 0
 class AvalumaVideoGenerator(VideoGenerator):
     def __init__(self, runtime: AvalumaRuntime):
         self._runtime = runtime
+        self._audio_resampler = rtc.AudioResampler(
+            input_rate=48000, output_rate=16000, quality=rtc.AudioResamplerQuality.QUICK
+        )
 
     @property
     def video_resolution(self) -> tuple[int, int]:
@@ -51,9 +53,20 @@ class AvalumaVideoGenerator(VideoGenerator):
         if isinstance(frame, AudioSegmentEnd):
             await self._runtime.flush()
             return
-        await self._runtime.push_audio(
-            bytes(frame.data), frame.sample_rate, last_chunk=False
-        )
+
+        if frame.sample_rate == 48000:
+            # print("Resampling audio from 48kHz to 16kHz")
+            for resampled_frame in self._audio_resampler.push(frame):
+                await self._runtime.push_audio(
+                    bytes(resampled_frame.data),
+                    resampled_frame.sample_rate,
+                    last_chunk=False,
+                )
+            self._audio_resampler.flush()
+        else:
+            await self._runtime.push_audio(
+                bytes(frame.data), frame.sample_rate, last_chunk=False
+            )
 
     def clear_buffer(self) -> None:
         self._runtime.interrupt()

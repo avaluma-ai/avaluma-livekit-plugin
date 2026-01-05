@@ -9,15 +9,23 @@ from .resources import (
     ResourceStatus,
     ResourceThresholds,
 )
+from .avatar import AvalumaException, AvatarSession, LocalAvatarSession
+from .local.avatar_cpp_wrapper import AvalumaRuntime
+from .local.avatar_runner import AvalumaAvatarRunner
+from .local.video_generator import AvalumaVideoGenerator
 from .version import __version__
 
 __all__ = [
     "AvalumaException",
+    "AvalumaAvatarRunner",
+    "AvalumaRuntime",
+    "AvalumaVideoGenerator",
     "AvatarSession",
     "InsufficientResourcesError",
     "ResourceMonitor",
     "ResourceStatus",
     "ResourceThresholds",
+    "LocalAvatarSession",
     "__version__",
 ]
 
