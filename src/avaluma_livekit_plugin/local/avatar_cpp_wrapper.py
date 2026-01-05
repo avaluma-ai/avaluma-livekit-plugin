@@ -6,10 +6,16 @@ making it compatible with LiveKit's async/await patterns.
 """
 
 import asyncio
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import AsyncGenerator
 
 import numpy as np
+
+from ..log import logger
+
+# A/V Sync Debug Flag - set to True to enable detailed timing logs
+AV_SYNC_DEBUG = False
 
 # PERFORMANCE: Single-threaded executor to avoid constant EGL context switching
 # This ensures all C++ calls run on the SAME thread, keeping EGL context bound
@@ -112,19 +118,19 @@ class AvalumaRuntime:
             config.fps = kwargs["fps"]
 
         # Create C++ runtime
-        print(f"Creating AvalumaRuntime: {config}")
+        logger.info(f"Creating AvalumaRuntime: {config}")
         self._cpp_runtime = avaluma_runtime.AvalumaRuntime(config)
 
         # Initialize
-        print("Initializing C++ runtime...")
+        logger.info("Initializing C++ runtime...")
         if not self._cpp_runtime.initialize():
             raise RuntimeError("Failed to initialize C++ AvalumaRuntime")
 
-        print("✓ AvalumaRuntime initialized successfully")
+        logger.info("AvalumaRuntime initialized successfully")
 
         # Populate settings
         self.settings = AvalumaRuntimeSettings(self._cpp_runtime)
-        print(f"  Settings: {self.settings}")
+        logger.info(f"Runtime settings: {self.settings}")
 
     async def push_audio(self, byte_data, sample_rate, last_chunk=False):
         """
@@ -135,6 +141,16 @@ class AvalumaRuntime:
             sample_rate: Sample rate (should be 16000)
             last_chunk: Whether this is the last chunk (triggers flush if True)
         """
+        # A/V Sync Debug: Log audio push timing
+        if AV_SYNC_DEBUG:
+            wall_time = time.perf_counter()
+            audio_size = len(byte_data)
+            audio_duration_ms = (audio_size / 2) / sample_rate * 1000  # int16 = 2 bytes
+            logger.debug(
+                f"[AV_DEBUG] push_audio: wall={wall_time:.3f}s, "
+                f"size={audio_size}b, dur={audio_duration_ms:.1f}ms, sr={sample_rate}"
+            )
+
         # Run blocking C++ call in single-threaded executor
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(
@@ -177,7 +193,7 @@ class AvalumaRuntime:
                     40,  # 40ms timeout (matches frame duration @ 25 FPS)
                 )
             except Exception as e:
-                print(f"Error getting frame: {e}")
+                logger.error(f"Error getting frame: {e}")
                 break
 
             if cpp_frame is None:
@@ -188,11 +204,11 @@ class AvalumaRuntime:
                 consecutive_none_count += 1
 
                 if consecutive_none_count >= max_none_retries:
-                    print(f"Timeout: No frames after {max_none_retries} retries (30s)")
+                    logger.warning(f"Timeout: No frames after {max_none_retries} retries (30s)")
                     break  # Really stopped or timeout
 
                 # Wait for audio or next retry (don't spam C++ with requests)
-                await asyncio.sleep(0.1)  # 100ms between retries
+                await asyncio.sleep(0.039)  # 50ms between retries
                 continue  # Try again
 
             # Reset none counter - we got a frame!
@@ -214,9 +230,17 @@ class AvalumaRuntime:
                 duration_us=cpp_frame.duration_us,
             )
 
-            # SYNC_DEBUG: Log every 10th frame to diagnose A/V sync
-            if frame.frame_number % 1000 == 0:
-                print(
+            # A/V Sync Debug: Log frame output timing
+            if AV_SYNC_DEBUG:
+                frame_wall_time = time.perf_counter()
+                logger.debug(
+                    f"[AV_DEBUG] get_frame: wall={frame_wall_time:.3f}s, "
+                    f"ts={frame.timestamp_us}us ({frame.timestamp_us / 1e6:.3f}s), "
+                    f"frame#{frame.frame_number}, eos={frame.end_of_speech}"
+                )
+            # Legacy SYNC_DEBUG: Log every 1000th frame
+            elif frame.frame_number % 1000 == 0:
+                logger.debug(
                     f"SYNC_DEBUG: Python yielding frame #{frame.frame_number}, "
                     f"timestamp={frame.timestamp_us}us ({frame.timestamp_us / 1e6:.3f}s), "
                     f"end_of_speech={frame.end_of_speech}"
@@ -296,7 +320,7 @@ if __name__ == "__main__":
             license_key="test_key",
         )
 
-        print(f"\nRuntime created: {runtime.settings}")
+        logger.info(f"Runtime created: {runtime.settings}")
 
         # Generate test audio (1 second @ 16kHz sine wave)
         sample_rate = 16000
@@ -310,26 +334,26 @@ if __name__ == "__main__":
         audio_bytes = audio.tobytes()
 
         # Push audio
-        print("\nPushing audio...")
+        logger.info("Pushing audio...")
         await runtime.push_audio(audio_bytes, sample_rate, last_chunk=False)
 
         # Generate frames
-        print("\nGenerating frames...")
+        logger.info("Generating frames...")
         frame_count = 0
 
         async for frame in runtime.run():
             frame_count += 1
-            print(f"Frame {frame_count}: {frame}")
+            logger.info(f"Frame {frame_count}: {frame}")
 
             if frame_count >= 25:  # 1 second worth of frames
                 break
 
         await runtime.stop()
-        print(f"\n✓ Generated {frame_count} frames successfully")
+        logger.info(f"Generated {frame_count} frames successfully")
 
     # Run test
     try:
         asyncio.run(test_basic_flow())
     except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
+        logger.error(f"Error: {e}")
         sys.exit(1)

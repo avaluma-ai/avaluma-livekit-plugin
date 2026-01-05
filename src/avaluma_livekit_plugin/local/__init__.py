@@ -58,9 +58,9 @@ if os.path.exists(LIB_DIR):
             try:
                 ctypes.CDLL(lib_path, mode=ctypes.RTLD_GLOBAL)
             except Exception as e:
-                print(f"[Avaluma] Warning: Could not preload {lib_name}: {e}")
+                logger.warning(f"Could not preload {lib_name}: {e}")
 
-    print(f"[Avaluma] Preloaded shared libraries from {LIB_DIR}")
+    logger.info(f"Preloaded shared libraries from {LIB_DIR}")
 else:
     logger.error("Lib directory not found at %s", LIB_DIR)
 
