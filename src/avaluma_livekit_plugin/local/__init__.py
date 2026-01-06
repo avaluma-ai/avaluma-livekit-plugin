@@ -7,6 +7,8 @@ import logging
 import os
 import sys
 
+from .bin_downloader import BinDownloader
+
 logger = logging.getLogger("Avaluma Binary")
 
 
@@ -14,10 +16,13 @@ logger = logging.getLogger("Avaluma Binary")
 BINARY_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bin")
 LIB_DIR = os.path.join(BINARY_DIR, "lib")
 
-if os.path.exists(BINARY_DIR):
-    logger.info("Directory for avaluma_runtime C++ module: %s", BINARY_DIR)
-else:
-    os.mkdir(BINARY_DIR)
+# if os.path.exists(BINARY_DIR):
+#     logger.info("Directory for avaluma_runtime C++ module: %s", BINARY_DIR)
+# else:
+#     os.mkdir(BINARY_DIR)
+
+# Download binaries if they don't exist
+BinDownloader()
 
 if not os.listdir(BINARY_DIR):
     logger.error(
