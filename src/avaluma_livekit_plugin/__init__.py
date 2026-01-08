@@ -2,17 +2,17 @@
 Avaluma plugin for LiveKit Agents
 """
 
-from .avatar import AvalumaException, AvatarSession
+from .avatar import AvalumaException, AvatarSession, LocalAvatarSession
+from .legacy_avatar import AvatarSession
+from .local.avatar_cpp_wrapper import AvalumaRuntime
+from .local.avatar_runner import AvalumaAvatarRunner
+from .local.video_generator import AvalumaVideoGenerator
 from .resources import (
     InsufficientResourcesError,
     ResourceMonitor,
     ResourceStatus,
     ResourceThresholds,
 )
-from .avatar import AvalumaException, AvatarSession, LocalAvatarSession
-from .local.avatar_cpp_wrapper import AvalumaRuntime
-from .local.avatar_runner import AvalumaAvatarRunner
-from .local.video_generator import AvalumaVideoGenerator
 from .version import __version__
 
 __all__ = [
