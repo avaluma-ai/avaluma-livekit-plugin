@@ -52,13 +52,13 @@ class AvalumaAvatarRunner(AvatarRunner):
             _lazy_publish=_lazy_publish,
         )
 
-        # Recreate AVSynchronizer with doubled values for better A/V sync
-        self._av_sync = rtc.AVSynchronizer(
-            audio_source=self._audio_source,
-            video_source=self._video_source,
-            video_fps=options.video_fps,
-            video_queue_size_ms=200,  # doubled from 100
-            _max_delay_tolerance_ms=600,  # doubled from 300
+        # Note: We keep the parent's AVSynchronizer as-is.
+        # The parent creates it with video_queue_size_ms=_queue_size_ms (default 100ms).
+        # Previously we tried to recreate it with larger values, but this caused
+        # the old AVSynchronizer's _capture_video task to become orphaned and get
+        # destroyed while pending, which broke video streaming after ~20 seconds.
+        logger.info(
+            f"Using parent AVSynchronizer with queue_size={_queue_size_ms}ms"
         )
 
     @log_exceptions(logger=logger)

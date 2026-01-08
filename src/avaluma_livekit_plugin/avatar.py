@@ -8,6 +8,7 @@ from livekit import api, rtc
 from livekit.agents import (
     DEFAULT_API_CONNECT_OPTIONS,
     NOT_GIVEN,
+    Agent,
     AgentSession,
     APIConnectionError,
     APIStatusError,
@@ -50,6 +51,7 @@ class LocalAvatarSession:
         self._audio_buffer = QueueAudioOutput(
             sample_rate=self._runtime.settings.INPUT_SAMPLE_RATE
         )
+        self._ingress_task: asyncio.Task | None = None
 
     async def start(
         self, room: rtc.Room, agent_session: NotGivenOr[AgentSession] = NOT_GIVEN
@@ -80,6 +82,14 @@ class LocalAvatarSession:
 
         if agent_session:
             agent_session.output.audio = self._audio_buffer
+        else:
+            # Importent otherwise the agent video stops after 10s
+            ctx = get_job_context()
+            session = AgentSession()
+            await session.start(
+                agent=Agent(instructions=""),
+                room=ctx.room,
+            )
 
         def on_track_subscribed(
             track: rtc.Track,
@@ -116,14 +126,34 @@ class LocalAvatarSession:
         await self._runtime.stop()
 
     async def process_ingress_track(self, track: rtc.AudioTrack):
-        """Process audio frames from the ingress track and push them to the avatar."""
-        audio_stream = rtc.AudioStream(track)
-        async for frame_event in audio_stream:
-            frame = frame_event.frame
-            # print(
-            #     f"SampleRate: {frame.sample_rate}, Channels: {frame.num_channels}, SamplesPerChannel: {frame.samples_per_channel}, Length: {len(frame.data)}"
-            # )
-            await self._audio_buffer.capture_frame(frame)
+        """Process audio frames from the ingress track and push them to the avatar.
+
+        If a previous ingress track is being processed, it will be cancelled
+        so only the most recent track is used.
+        """
+        # Cancel previous ingress task if it exists
+        if self._ingress_task and not self._ingress_task.done():
+            logger.info("Cancelling previous ingress track processing task")
+            self._ingress_task.cancel()
+            try:
+                await self._ingress_task
+            except asyncio.CancelledError:
+                pass
+
+        # Store reference to current task
+        self._ingress_task = asyncio.current_task()
+
+        try:
+            audio_stream = rtc.AudioStream(track)
+            async for frame_event in audio_stream:
+                frame = frame_event.frame
+                # print(
+                #     f"SampleRate: {frame.sample_rate}, Channels: {frame.num_channels}, SamplesPerChannel: {frame.samples_per_channel}, Length: {len(frame.data)}"
+                # )
+                await self._audio_buffer.capture_frame(frame)
+        except asyncio.CancelledError:
+            logger.info("Ingress track processing cancelled")
+            raise
 
 
 class RemoteAvatarSession:

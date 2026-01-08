@@ -2,7 +2,7 @@
 Avaluma plugin for LiveKit Agents
 """
 
-from .avatar import AvalumaException, AvatarSession, LocalAvatarSession
+from .avatar import AvalumaException, LocalAvatarSession
 from .legacy_avatar import AvatarSession
 from .local.avatar_cpp_wrapper import AvalumaRuntime
 from .local.avatar_runner import AvalumaAvatarRunner
