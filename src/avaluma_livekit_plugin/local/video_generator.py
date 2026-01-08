@@ -1,3 +1,4 @@
+import hashlib
 import logging
 import time
 from collections import deque
@@ -33,6 +34,7 @@ AV_SYNC_OFFSET = 0
 class AvalumaVideoGenerator(VideoGenerator):
     def __init__(self, session: AvatarSession):
         self._session = session
+        self._first_video_timestamp_us: int | None = None  # For timestamp normalization
 
     @property
     def video_resolution(self) -> tuple[int, int]:
@@ -60,52 +62,68 @@ class AvalumaVideoGenerator(VideoGenerator):
 
     def __aiter__(
         self,
-    ) -> AsyncIterator[rtc.VideoFrame | rtc.AudioFrame | AudioSegmentEnd]:
+    ) -> AsyncIterator[tuple[rtc.VideoFrame | rtc.AudioFrame | AudioSegmentEnd, float | None] | AudioSegmentEnd]:
         return self._stream_impl()
 
     async def _stream_impl(
         self,
-    ) -> AsyncGenerator[rtc.VideoFrame | rtc.AudioFrame | AudioSegmentEnd, None]:
+    ) -> AsyncGenerator[tuple[rtc.VideoFrame | rtc.AudioFrame | AudioSegmentEnd, float | None] | AudioSegmentEnd, None]:
         def create_video_frame(image: np.ndarray, timestamp_us: int) -> rtc.VideoFrame:
-            image = image[:, :, [2, 1, 0]]
+            image = image[:, :, [2, 1, 0]]  # BGR to RGB
+
+            # NEW: Compute hash of image data
+            image_bytes = image.tobytes()
+            image_hash = hashlib.md5(image_bytes[:10000]).hexdigest()[:8]  # Sample first 10KB
+
+            if AV_SYNC_DEBUG:
+                print(f"[FRAME-DEBUG-PY] create_video_frame: hash={image_hash}, shape={image.shape}")
+
             video_frame = rtc.VideoFrame(
                 width=image.shape[1],
                 height=image.shape[0],
                 type=rtc.VideoBufferType.RGB24,
-                data=image.tobytes(),
+                data=image_bytes,
             )
-            # Store timestamp as dynamic attribute (for AVSynchronizer)
-            video_frame.timestamp_s = timestamp_us / 1_000_000.0
             return video_frame
 
         # A/V Sync Debug: Buffers for frame offset
         # Positive offset = delay video (audio first)
         # Negative offset = delay audio (video first)
-        video_buffer: deque[rtc.VideoFrame] = deque()
-        audio_buffer: deque[rtc.AudioFrame] = deque()
+        video_buffer: deque[tuple[rtc.VideoFrame, float]] = deque()
+        audio_buffer: deque[tuple[rtc.AudioFrame, float]] = deque()
         offset = AV_SYNC_OFFSET
 
         if offset != 0:
             logger.info(f"A/V Sync Debug: Using frame offset {offset} ({offset * 40}ms)")
 
         async for frame in self._session.run():
+            # Normalize timestamps: first video frame starts at 0.0
+            if frame.bgr_image is not None and self._first_video_timestamp_us is None:
+                self._first_video_timestamp_us = frame.timestamp_us
+                if AV_SYNC_DEBUG:
+                    print(f"[AV_DEBUG] timestamp_normalization: offset={self._first_video_timestamp_us}us ({self._first_video_timestamp_us / 1_000_000.0:.3f}s)")
+
             # Convert timestamp from microseconds to seconds (for AVSynchronizer)
-            timestamp_s = frame.timestamp_us / 1_000_000.0
+            # Use normalized timestamps (relative to first video frame)
+            normalized_timestamp_us = frame.timestamp_us
+            if self._first_video_timestamp_us is not None:
+                normalized_timestamp_us = frame.timestamp_us - self._first_video_timestamp_us
+            timestamp_s = normalized_timestamp_us / 1_000_000.0
 
             if frame.bgr_image is not None:
-                video_frame = create_video_frame(frame.bgr_image, frame.timestamp_us)
+                video_frame = create_video_frame(frame.bgr_image, normalized_timestamp_us)
 
                 if offset > 0:
                     # Positive offset: Buffer video, yield after delay
-                    video_buffer.append(video_frame)
+                    video_buffer.append((video_frame, timestamp_s))
                     if len(video_buffer) > offset:
-                        delayed_video = video_buffer.popleft()
+                        delayed_video, delayed_ts = video_buffer.popleft()
                         if AV_SYNC_DEBUG:
                             emit_time = time.perf_counter()
                             print(
                                 f"[AV_DEBUG] emit_video (delayed +{offset}): wall={emit_time:.3f}s"
                             )
-                        yield delayed_video
+                        yield (delayed_video, delayed_ts)
                 else:
                     # Zero or negative offset: Yield video immediately
                     if AV_SYNC_DEBUG:
@@ -114,7 +132,7 @@ class AvalumaVideoGenerator(VideoGenerator):
                             f"[AV_DEBUG] emit_video: wall={emit_time:.3f}s, "
                             f"ts={timestamp_s:.3f}s, frame#{frame.frame_number}"
                         )
-                    yield video_frame
+                    yield (video_frame, timestamp_s)
 
             audio_chunk = frame.audio_chunk
             if audio_chunk is not None:
@@ -124,20 +142,18 @@ class AvalumaVideoGenerator(VideoGenerator):
                     num_channels=1,
                     samples_per_channel=audio_chunk.num_samples,
                 )
-                # Store timestamp as dynamic attribute (for AVSynchronizer)
-                audio_frame.timestamp_s = timestamp_s
 
                 if offset < 0:
                     # Negative offset: Buffer audio, yield after delay
-                    audio_buffer.append(audio_frame)
+                    audio_buffer.append((audio_frame, timestamp_s))
                     if len(audio_buffer) > abs(offset):
-                        delayed_audio = audio_buffer.popleft()
+                        delayed_audio, delayed_ts = audio_buffer.popleft()
                         if AV_SYNC_DEBUG:
                             emit_time = time.perf_counter()
                             print(
                                 f"[AV_DEBUG] emit_audio (delayed {offset}): wall={emit_time:.3f}s"
                             )
-                        yield delayed_audio
+                        yield (delayed_audio, delayed_ts)
                 else:
                     # Zero or positive offset: Yield audio immediately
                     if AV_SYNC_DEBUG:
@@ -149,7 +165,7 @@ class AvalumaVideoGenerator(VideoGenerator):
                             f"[AV_DEBUG] emit_audio: wall={emit_time:.3f}s, "
                             f"ts={timestamp_s:.3f}s, dur={audio_dur_ms:.1f}ms"
                         )
-                    yield audio_frame
+                    yield (audio_frame, timestamp_s)
 
         # FIX: Only yield AudioSegmentEnd ONCE after the C++ loop ends (returns None)
         # Previously this was inside the loop, causing multiple EOS markers

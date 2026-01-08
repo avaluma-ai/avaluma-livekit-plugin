@@ -27,6 +27,7 @@ Usage:
 """
 
 import asyncio
+import hashlib
 import os
 import threading
 import time
@@ -38,7 +39,7 @@ import numpy as np
 from ..log import logger
 
 # A/V Sync Debug Flag - set to True to enable detailed timing logs
-AV_SYNC_DEBUG = False
+AV_SYNC_DEBUG = True
 
 # PERFORMANCE: Single-threaded executor to avoid constant EGL context switching
 # This ensures all C++ calls run on the SAME thread, keeping EGL context bound
@@ -135,7 +136,6 @@ class AvalumaRuntime:
 
         module_dir = os.path.dirname(avaluma_runtime.__file__)
         logger.info(f"AvalumaRuntime: C++ module at {module_dir}")
-        logger.info("AvalumaRuntime: Creating singleton (RAII)")
 
         self._cpp_runtime = avaluma_runtime.AvalumaRuntime()
         self._initialized = True
@@ -164,6 +164,7 @@ class AvalumaRuntime:
             AvatarSession object for the created session
         """
         logger.info(f"Creating session for: {asset_path}")
+
         session_id = self._cpp_runtime.create_session(
             asset_path=asset_path,
             width=width,
@@ -171,6 +172,7 @@ class AvalumaRuntime:
             fps=fps,
             sample_rate=sample_rate,
         )
+
         logger.info(f"Session created: {session_id}")
         return AvatarSession(self._cpp_runtime, session_id, width, height, fps, sample_rate)
 
@@ -271,79 +273,114 @@ class AvatarSession:
                 if frame.end_of_speech:
                     break
         """
+        logger.info(f"[RUN-DEBUG] run() loop STARTED for session {self._session_id}")
+
         consecutive_none_count = 0
         max_none_retries = 300  # 30 seconds @ 100ms each (wait for TTS to start)
+        frame_count = 0
+        loop_iteration = 0
+        prev_hash = None  # For boundary check
 
-        while True:
-            # Get next frame from C++ (blocking call in single-threaded executor)
-            try:
-                loop = asyncio.get_event_loop()
-                cpp_frame = await loop.run_in_executor(
-                    _render_executor,
-                    self._cpp_runtime.get_next_frame,
-                    self._session_id,
-                    40,  # 40ms timeout (matches frame duration @ 25 FPS)
+        try:
+            while True:
+                loop_iteration += 1
+                logger.info(f"[RUN-DEBUG] Loop iteration #{loop_iteration}: Calling getNextFrame()...")
+
+                # Get next frame from C++ (blocking call in single-threaded executor)
+                try:
+                    loop = asyncio.get_event_loop()
+                    cpp_frame = await loop.run_in_executor(
+                        _render_executor,
+                        self._cpp_runtime.get_next_frame,
+                        self._session_id,
+                        40,  # 40ms timeout (matches frame duration @ 25 FPS)
+                    )
+                except Exception as e:
+                    logger.error(f"[RUN-DEBUG] Exception in run_in_executor: {e}")
+                    logger.error(f"Error getting frame: {e}")
+                    break
+
+                if cpp_frame is None:
+                    logger.warning(f"[RUN-DEBUG] Loop iteration #{loop_iteration}: getNextFrame() returned None (timeout)")
+                    # Could be:
+                    # 1. Waiting for first audio (C++ returns nullptr non-blocking)
+                    # 2. Timeout (no audio in buffer)
+                    # 3. Actually stopped
+                    consecutive_none_count += 1
+
+                    if consecutive_none_count >= max_none_retries:
+                        logger.warning(f"[RUN-DEBUG] Timeout: No frames after {max_none_retries} retries (30s)")
+                        logger.warning(f"Timeout: No frames after {max_none_retries} retries (30s)")
+                        break  # Really stopped or timeout
+
+                    # Wait for audio or next retry (don't spam C++ with requests)
+                    await asyncio.sleep(0.039)  # ~40ms between retries
+                    continue  # Try again
+
+                # Reset none counter - we got a frame!
+                consecutive_none_count = 0
+                frame_count += 1
+                logger.info(f"[RUN-DEBUG] Loop iteration #{loop_iteration}: Got frame #{cpp_frame.frame_number} (total successful frames: {frame_count})")
+
+                # NEW: Boundary check - hash the BGR image data
+                if cpp_frame.bgr_image is not None:
+                    bgr_bytes = cpp_frame.bgr_image.tobytes()
+                    current_hash = hashlib.md5(bgr_bytes[:10000]).hexdigest()[:8]
+
+                    if prev_hash == current_hash:
+                        logger.warning(f"[BOUNDARY-DEBUG] Frame #{cpp_frame.frame_number}: "
+                                      f"SAME HASH as previous frame! hash={current_hash} ❌")
+                    else:
+                        logger.info(f"[BOUNDARY-DEBUG] Frame #{cpp_frame.frame_number}: "
+                                   f"NEW HASH {current_hash} (prev: {prev_hash}) ✅")
+
+                    prev_hash = current_hash
+
+                # Wrap C++ audio chunk in Python object (may be empty)
+                cpp_audio = cpp_frame.audio_chunk
+                if cpp_audio and cpp_audio.bytes:
+                    audio_chunk = AudioChunk(
+                        cpp_audio.bytes,
+                        cpp_audio.num_samples,
+                        cpp_audio.sample_rate,
+                    )
+                else:
+                    audio_chunk = None
+
+                frame = Frame(
+                    audio_chunk,
+                    cpp_frame.bgr_image,  # Already np.ndarray via PyBind11
+                    cpp_frame.end_of_speech,
+                    timestamp_us=cpp_frame.timestamp_us,
+                    frame_number=cpp_frame.frame_number,
+                    duration_us=cpp_frame.duration_us,
                 )
-            except Exception as e:
-                logger.error(f"Error getting frame: {e}")
-                break
 
-            if cpp_frame is None:
-                # Could be:
-                # 1. Waiting for first audio (C++ returns nullptr non-blocking)
-                # 2. Timeout (no audio in buffer)
-                # 3. Actually stopped
-                consecutive_none_count += 1
+                # A/V Sync Debug: Log frame output timing
+                if AV_SYNC_DEBUG:
+                    frame_wall_time = time.perf_counter()
+                    audio_info = f"{audio_chunk.num_samples} samples" if audio_chunk else "no audio"
+                    print(
+                        f"[AV_DEBUG] get_frame: wall={frame_wall_time:.3f}s, "
+                        f"ts={frame.timestamp_us}us ({frame.timestamp_us / 1e6:.3f}s), "
+                        f"frame#{frame.frame_number}, {audio_info}, eos={frame.end_of_speech}"
+                    )
+                # Legacy SYNC_DEBUG: Log every 1000th frame
+                elif frame.frame_number % 1000 == 0:
+                    logger.debug(
+                        f"Python yielding frame #{frame.frame_number}, "
+                        f"timestamp={frame.timestamp_us}us ({frame.timestamp_us / 1e6:.3f}s), "
+                        f"end_of_speech={frame.end_of_speech}"
+                    )
 
-                if consecutive_none_count >= max_none_retries:
-                    logger.warning(f"Timeout: No frames after {max_none_retries} retries (30s)")
-                    break  # Really stopped or timeout
+                logger.info(f"[RUN-DEBUG] Loop iteration #{loop_iteration}: Yielding frame #{frame.frame_number}")
+                yield frame
 
-                # Wait for audio or next retry (don't spam C++ with requests)
-                await asyncio.sleep(0.039)  # ~40ms between retries
-                continue  # Try again
-
-            # Reset none counter - we got a frame!
-            consecutive_none_count = 0
-
-            # Wrap C++ audio chunk in Python object (may be empty)
-            cpp_audio = cpp_frame.audio_chunk
-            if cpp_audio and cpp_audio.bytes:
-                audio_chunk = AudioChunk(
-                    cpp_audio.bytes,
-                    cpp_audio.num_samples,
-                    cpp_audio.sample_rate,
-                )
-            else:
-                audio_chunk = None
-
-            frame = Frame(
-                audio_chunk,
-                cpp_frame.bgr_image,  # Already np.ndarray via PyBind11
-                cpp_frame.end_of_speech,
-                timestamp_us=cpp_frame.timestamp_us,
-                frame_number=cpp_frame.frame_number,
-                duration_us=cpp_frame.duration_us,
-            )
-
-            # A/V Sync Debug: Log frame output timing
-            if AV_SYNC_DEBUG:
-                frame_wall_time = time.perf_counter()
-                audio_info = f"{audio_chunk.num_samples} samples" if audio_chunk else "no audio"
-                print(
-                    f"[AV_DEBUG] get_frame: wall={frame_wall_time:.3f}s, "
-                    f"ts={frame.timestamp_us}us ({frame.timestamp_us / 1e6:.3f}s), "
-                    f"frame#{frame.frame_number}, {audio_info}, eos={frame.end_of_speech}"
-                )
-            # Legacy SYNC_DEBUG: Log every 1000th frame
-            elif frame.frame_number % 1000 == 0:
-                logger.debug(
-                    f"Python yielding frame #{frame.frame_number}, "
-                    f"timestamp={frame.timestamp_us}us ({frame.timestamp_us / 1e6:.3f}s), "
-                    f"end_of_speech={frame.end_of_speech}"
-                )
-
-            yield frame
+        except Exception as e:
+            logger.error(f"[RUN-DEBUG] run() loop CRASHED at iteration #{loop_iteration} (total frames: {frame_count}): {e}")
+            raise
+        finally:
+            logger.info(f"[RUN-DEBUG] run() loop EXITED after {loop_iteration} iterations ({frame_count} successful frames)")
 
     async def flush(self):
         """

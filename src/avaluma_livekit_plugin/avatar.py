@@ -71,20 +71,23 @@ class LocalAvatarSession:
         self._avatar_id = avatar_id
         self._assets_dir = assets_dir
         self._session: AvatarSession | None = None
+        self._prepared = False
 
-    async def start(
-        self,
-        agent_session: AgentSession,
-        room: rtc.Room,
-    ) -> None:
+    async def prepare(self, agent_session: AgentSession) -> None:
         """
-        Start the local avatar session.
+        Prepare audio routing. Call this BEFORE session.start().
+
+        This sets up the audio buffer and routing so that TTS audio
+        will be routed to the avatar's animation pipeline.
 
         Args:
             agent_session: The LiveKit agent session
-            room: The LiveKit room
         """
-        # Create the underlying AvatarSession on first start
+        if self._prepared:
+            logger.info("Avatar already prepared")
+            return
+
+        # Create the underlying AvatarSession if needed
         if self._session is None:
             self._session = AvatarSession(
                 license_key=self._license_key,
@@ -93,7 +96,28 @@ class LocalAvatarSession:
                 mode="local",
             )
 
-        await self._session.start(agent_session, room)
+        # Prepare the session (creates audio buffer and sets routing)
+        await self._session.prepare(agent_session)
+        self._prepared = True
+        logger.info("Avatar audio routing prepared")
+
+    async def start(
+        self,
+        room: rtc.Room,
+    ) -> None:
+        """
+        Start the local avatar session. Call this AFTER ctx.connect().
+
+        Args:
+            room: The LiveKit room (must be connected)
+        """
+        if not self._prepared:
+            raise AvalumaException(
+                "Avatar not prepared. Call avatar.prepare(agent_session) before session.start()"
+            )
+
+        # Start the session (creates C++ session and video rendering)
+        await self._session.start_rendering(room)
 
     @property
     def session(self):
@@ -159,6 +183,55 @@ class AvatarSession:
         self._http_session: aiohttp.ClientSession | None = None
         self._avatar_runner: AvatarRunner | None = None
         self._cpp_session: CppAvatarSession | None = None
+        self._audio_buffer: QueueAudioOutput | None = None
+        self._prepared = False
+
+    async def prepare(self, agent_session: AgentSession) -> None:
+        """
+        Prepare audio routing. Call this BEFORE session.start().
+
+        This creates the audio buffer and sets up routing so TTS audio
+        goes to the avatar's animation pipeline.
+
+        Args:
+            agent_session: The LiveKit agent session
+        """
+        if self._prepared:
+            logger.info("Avatar session already prepared")
+            return
+
+        if self._mode == "local":
+            # Create audio buffer for local mode (16000 Hz for avatar animation)
+            self._audio_buffer = QueueAudioOutput(sample_rate=16000)
+            # Set audio routing so TTS audio goes to avatar
+            agent_session.output.audio = self._audio_buffer
+            self._prepared = True
+            logger.info("Avatar audio routing prepared (local mode)")
+        elif self._mode == "remote":
+            # Remote mode doesn't need early preparation
+            self._prepared = True
+            logger.info("Avatar prepared (remote mode)")
+        else:
+            raise AvalumaException(f"Invalid mode: {self._mode}")
+
+    async def start_rendering(self, room: rtc.Room) -> None:
+        """
+        Start avatar rendering. Call this AFTER ctx.connect().
+
+        Args:
+            room: The LiveKit room (must be connected)
+        """
+        if not self._prepared:
+            raise AvalumaException(
+                "Avatar not prepared. Call avatar.prepare(agent_session) before start_rendering()"
+            )
+
+        if self._mode == "local":
+            await self._start_local_rendering(room)
+        elif self._mode == "remote":
+            logger.warning("start_rendering() not needed for remote mode")
+        else:
+            raise AvalumaException(f"Invalid mode: {self._mode}")
 
     async def start(
         self,
@@ -169,8 +242,20 @@ class AvatarSession:
         livekit_api_key: NotGivenOr[str] = NOT_GIVEN,
         livekit_api_secret: NotGivenOr[str] = NOT_GIVEN,
     ) -> None:
+        """
+        Legacy method for backwards compatibility.
+
+        For new code, use prepare() + start_rendering() instead.
+        """
         if self._mode == "local":
-            await self._start_local(agent_session, room)
+            logger.warning(
+                "Using legacy start() method. "
+                "Consider using prepare() before session.start() "
+                "and start_rendering() after ctx.connect() instead."
+            )
+            # Old behavior: do everything at once
+            await self.prepare(agent_session)
+            await self._start_local_rendering(room)
         elif self._mode == "remote":
             await self._start_remote(
                 agent_session,
@@ -182,7 +267,18 @@ class AvatarSession:
         else:
             raise AvalumaException(f"Invalid mode: {self._mode}")
 
-    async def _start_local(self, agent_session: AgentSession, room: rtc.Room) -> None:
+    async def _start_local_rendering(self, room: rtc.Room) -> None:
+        """
+        Start local avatar rendering (C++ session + video track).
+
+        This should be called AFTER ctx.connect() and AFTER prepare().
+        """
+        if not self._prepared:
+            raise AvalumaException("Avatar not prepared - call prepare() first")
+
+        if self._audio_buffer is None:
+            raise AvalumaException("Audio buffer not created - call prepare() first")
+
         if not self._cpp_session:
             if self._assets_dir is None:
                 raise ValueError("assets_dir is not set")
@@ -221,7 +317,9 @@ class AvatarSession:
             audio_channels=1,
         )
 
-        audio_buffer = QueueAudioOutput(sample_rate=session.settings.INPUT_SAMPLE_RATE)
+        # Use pre-created audio buffer from prepare()
+        audio_buffer = self._audio_buffer
+
         # create avatar runner
         from .local.avatar_runner import AvalumaAvatarRunner
 
@@ -233,7 +331,7 @@ class AvatarSession:
         )
         await self._avatar_runner.start()
 
-        agent_session.output.audio = audio_buffer
+        logger.info("Avatar rendering started")
 
     async def _start_remote(
         self,

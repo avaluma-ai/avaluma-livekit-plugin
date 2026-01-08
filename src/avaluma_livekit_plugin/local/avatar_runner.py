@@ -58,15 +58,16 @@ class AvalumaAvatarRunner(AvatarRunner):
             video_source=self._video_source,
             video_fps=options.video_fps,
             video_queue_size_ms=200,  # doubled from 100
-            _max_delay_tolerance_ms=600,  # doubled from 300
+            _max_delay_tolerance_ms=1200,  # quadrupled from 300 (was 600)
         )
 
     @log_exceptions(logger=logger)
     async def _forward_video(self) -> None:
         """Forward video to the room through the AV synchronizer with timestamps"""
 
-        async for frame in self._video_gen:
-            if isinstance(frame, AudioSegmentEnd):
+        async for item in self._video_gen:
+            # Handle AudioSegmentEnd (not a tuple)
+            if isinstance(item, AudioSegmentEnd):
                 # notify the agent that the audio has finished playing
                 if self._audio_playing:
                     notify_task = self._audio_recv.notify_playback_finished(
@@ -82,19 +83,17 @@ class AvalumaAvatarRunner(AvatarRunner):
                         task.add_done_callback(self._tasks.discard)
                 continue
 
+            # Extract frame and timestamp from tuple
+            frame, timestamp_s = item
+
             if not self._video_publication:
                 await self._publish_track()
-
-            # Extract timestamp from frame attribute (if available)
-            timestamp_s = None
-            if hasattr(frame, "timestamp_s"):
-                timestamp_s = frame.timestamp_s
 
             # A/V Sync Debug: Log what goes to AVSynchronizer
             if AV_SYNC_DEBUG:
                 sync_time = time.perf_counter()
                 frame_type = "V" if isinstance(frame, rtc.VideoFrame) else "A"
-                ts_str = f"{timestamp_s:.3f}s" if timestamp_s else "None"
+                ts_str = f"{timestamp_s:.3f}s" if timestamp_s is not None else "None"
                 print(
                     f"[AV_DEBUG] av_sync.push: wall={sync_time:.3f}s, "
                     f"type={frame_type}, ts={ts_str}"
