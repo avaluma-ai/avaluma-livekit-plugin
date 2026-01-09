@@ -25,8 +25,12 @@ from livekit.agents.voice.avatar import (
 
 from .avatar import AvalumaException
 from .local.avatar_cpp_wrapper import AvalumaRuntime
+from .local.resources import (
+    InsufficientResourcesError,
+    ResourceMonitor,
+    ResourceThresholds,
+)
 from .log import logger
-from .resources import InsufficientResourcesError, ResourceMonitor, ResourceThresholds
 
 
 class AvatarSession:

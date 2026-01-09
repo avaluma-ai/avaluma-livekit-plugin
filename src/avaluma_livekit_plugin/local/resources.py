@@ -8,7 +8,7 @@ from typing import Optional
 
 import psutil
 
-from .log import logger
+from ..log import logger
 
 try:
     import pynvml

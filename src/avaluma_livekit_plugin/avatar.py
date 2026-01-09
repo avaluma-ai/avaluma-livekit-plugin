@@ -23,6 +23,11 @@ from livekit.agents.voice.avatar import (
     QueueAudioOutput,
 )
 
+from .local.resources import (
+    InsufficientResourcesError,
+    ResourceMonitor,
+    ResourceThresholds,
+)
 from .log import logger
 from .utils import delete_all_ingress_for_room, mute_track_for_user
 
@@ -32,7 +37,13 @@ class AvalumaException(Exception):
 
 
 class LocalAvatarSession:
-    def __init__(self, license_key: str, avatar_id: str, assets_dir: str):
+    def __init__(
+        self,
+        license_key: str,
+        avatar_id: str,
+        assets_dir: str,
+        check_resources: bool = True,
+    ):
         # TODO: check if local/bin is not empty
         if not os.path.exists(os.path.join(os.path.dirname(__file__), "local/bin")):
             raise AvalumaException("local/bin directory not found")
@@ -53,9 +64,22 @@ class LocalAvatarSession:
         )
         self._ingress_task: asyncio.Task | None = None
 
+        if check_resources:
+            thresholds = ResourceThresholds()
+            self._resource_monitor = ResourceMonitor(thresholds)
+            logger.info(
+                f"Resource monitor initialized with thresholds: "
+                f"RAM>={thresholds.min_free_ram_gb}GB, VRAM>={thresholds.min_free_vram_gb}GB"
+            )
+        else:
+            logger.info("Resource monitoring is disabled")
+
     async def start(
         self, room: rtc.Room, agent_session: NotGivenOr[AgentSession] = NOT_GIVEN
     ) -> None:
+        if self._resource_monitor:
+            await self.run_resource_check(room)
+
         from .local.video_generator import AvalumaVideoGenerator
 
         video_generator = AvalumaVideoGenerator(self._runtime)
@@ -153,6 +177,39 @@ class LocalAvatarSession:
                 await self._audio_buffer.capture_frame(frame)
         except asyncio.CancelledError:
             logger.info("Ingress track processing cancelled")
+            raise
+
+    async def run_resource_check(self, room: rtc.Room):
+        logger.info("Performing resource check...")
+        try:
+            status = self._resource_monitor.check_resources()
+            result_msg = f"Resource check passed: RAM={status.available_ram_gb:.2f}GB"
+            if status.available_vram_gb is not None:
+                result_msg += (
+                    f", VRAM={status.available_vram_gb:.2f}GB (GPU: {status.gpu_name})"
+                )
+            logger.info(result_msg)
+        except InsufficientResourcesError as e:
+            error_msg = f"Cannot create avatar '{self._avatar_id}': {e}"
+            logger.error(error_msg)
+
+            # Communicate error to frontend via participant attributes (if room is connected)
+            try:
+                if room.isconnected():
+                    await room.local_participant.set_attributes(
+                        {
+                            "error": "insufficient_resources",
+                            "error_message": str(e),
+                            "available_vram_gb": str(e.available_vram_gb or ""),
+                            "required_vram_gb": str(e.required_vram_gb or ""),
+                            "available_ram_gb": str(e.available_ram_gb or ""),
+                            "required_ram_gb": str(e.required_ram_gb or ""),
+                        }
+                    )
+            except Exception as attr_error:
+                logger.warning(f"Could not set participant attributes: {attr_error}")
+
+            logger.error(error_msg, exc_info=True)
             raise
 
 

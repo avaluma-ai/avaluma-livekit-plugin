@@ -2,30 +2,16 @@
 Avaluma plugin for LiveKit Agents
 """
 
-from .avatar import AvalumaException, LocalAvatarSession
+from .avatar import AvalumaException, LocalAvatarSession, RemoteAvatarSession
 from .legacy_avatar import AvatarSession
-from .local.avatar_cpp_wrapper import AvalumaRuntime
-from .local.avatar_runner import AvalumaAvatarRunner
-from .local.video_generator import AvalumaVideoGenerator
-from .resources import (
-    InsufficientResourcesError,
-    ResourceMonitor,
-    ResourceStatus,
-    ResourceThresholds,
-)
+from .local.bin_downloader import BinDownloader
 from .version import __version__
 
 __all__ = [
     "AvalumaException",
-    "AvalumaAvatarRunner",
-    "AvalumaRuntime",
-    "AvalumaVideoGenerator",
     "AvatarSession",
-    "InsufficientResourcesError",
-    "ResourceMonitor",
-    "ResourceStatus",
-    "ResourceThresholds",
     "LocalAvatarSession",
+    "RemoteAvatarSession",
     "__version__",
 ]
 
@@ -37,6 +23,11 @@ from .log import logger
 class AvalumaPlugin(Plugin):
     def __init__(self) -> None:
         super().__init__(__name__, __version__, __package__, logger)
+
+    def download_files(self):
+        logger.info("Downloading files for avaluma plugin")
+        BinDownloader()
+        logger.info("Files for avaluma downloaded successfully")
 
 
 Plugin.register_plugin(AvalumaPlugin())
