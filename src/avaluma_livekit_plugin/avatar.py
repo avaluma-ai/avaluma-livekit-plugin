@@ -49,6 +49,10 @@ class LocalAvatarSession:
             raise AvalumaException("local/bin directory not found")
 
         asset_path = os.path.join(assets_dir, f"{avatar_id}.hvia")
+        if avatar_id is None:
+            raise AvalumaException("avatar_id cannot be None")
+        elif not os.path.exists(asset_path):
+            raise AvalumaException(f"Asset file not found: {asset_path}")
 
         kwargs = {
             "license_key": license_key,
