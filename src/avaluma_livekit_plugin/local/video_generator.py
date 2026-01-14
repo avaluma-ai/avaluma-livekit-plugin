@@ -52,7 +52,14 @@ class AvalumaVideoGenerator(VideoGenerator):
     async def push_audio(self, frame: rtc.AudioFrame | AudioSegmentEnd) -> None:
         if isinstance(frame, AudioSegmentEnd):
             await self._runtime.flush()
+            # print("Audio segment end")
+            # sys.stdout.flush()
+            # logger.info("Audio frame end")
             return
+        # else:
+        #     print("Audio frame received")
+        #     sys.stdout.flush()
+        #     logger.info("Audio segment received")
 
         if frame.sample_rate == 48000:
             # print("Resampling audio from 48kHz to 16kHz")
@@ -99,7 +106,9 @@ class AvalumaVideoGenerator(VideoGenerator):
         offset = AV_SYNC_OFFSET
 
         if offset != 0:
-            logger.info(f"A/V Sync Debug: Using frame offset {offset} ({offset * 40}ms)")
+            logger.info(
+                f"A/V Sync Debug: Using frame offset {offset} ({offset * 40}ms)"
+            )
 
         async for frame in self._runtime.run():
             # Convert timestamp from microseconds to seconds (for AVSynchronizer)

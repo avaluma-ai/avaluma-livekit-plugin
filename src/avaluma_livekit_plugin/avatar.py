@@ -4,6 +4,7 @@ import asyncio
 import os
 
 import aiohttp
+import numpy as np
 from livekit import api, rtc
 from livekit.agents import (
     DEFAULT_API_CONNECT_OPTIONS,
@@ -173,11 +174,45 @@ class LocalAvatarSession:
 
         try:
             audio_stream = rtc.AudioStream(track)
+
+            # No VAD - fall back to RMS-based silence detection
+            print("using RMS-based silence detection")
+
+            SILENCE_THRESHOLD = 100  # RMS threshold for silence (adjust as needed)
+            SILENCE_FRAMES_REQUIRED = 10  # ~0.5s at 50fps before flushing
+
+            silence_frame_count = 0
+            is_speaking = False
+
             async for frame_event in audio_stream:
                 frame = frame_event.frame
                 # print(
                 #     f"SampleRate: {frame.sample_rate}, Channels: {frame.num_channels}, SamplesPerChannel: {frame.samples_per_channel}, Length: {len(frame.data)}"
                 # )
+                # Convert bytes to int16 samples and calculate RMS
+                samples = np.frombuffer(frame.data, dtype=np.int16)
+                rms = np.sqrt(np.mean(samples.astype(np.float32) ** 2))
+
+                if rms < SILENCE_THRESHOLD:
+                    silence_frame_count += 1
+                    if is_speaking and silence_frame_count >= SILENCE_FRAMES_REQUIRED:
+                        logger.debug(
+                            f"🔇 Silence detected (RMS={rms:.1f}, frames={silence_frame_count}) -> flushing"
+                        )
+                        self._audio_buffer.flush()
+                        is_speaking = False
+                    # Don't capture silence frames after flush
+                    if not is_speaking:
+                        continue
+                else:
+                    # Audio detected
+                    if not is_speaking:
+                        logger.debug(
+                            f"🔊 Audio detected (RMS={rms:.1f}) -> starting capture"
+                        )
+                        is_speaking = True
+                    silence_frame_count = 0
+
                 await self._audio_buffer.capture_frame(frame)
         except asyncio.CancelledError:
             logger.info("Ingress track processing cancelled")
