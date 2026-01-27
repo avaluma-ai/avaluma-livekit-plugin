@@ -253,10 +253,10 @@ class LocalAvatarSession:
 
 
 class RemoteAvatarSession:
-    def __init__(self, license_key: str, avatar_id: str, avalume_server_url: str):
+    def __init__(self, license_key: str, avatar_id: str, avaluma_server_url: str):
         self._license_key = license_key
         self._avatar_id = avatar_id
-        self._avaluma_server_url = avalume_server_url
+        self._avaluma_server_url = avaluma_server_url
 
         self._conn_options = DEFAULT_API_CONNECT_OPTIONS
         self._http_session = utils.http_context.http_session()
@@ -273,7 +273,7 @@ class RemoteAvatarSession:
         if not livekit_url or not livekit_api_key or not livekit_api_secret:
             raise AvalumaException(
                 "livekit_url, livekit_api_key, and livekit_api_secret must be set "
-                "by arguments or environment variables"
+                "by environment variables"
             )
 
         # Get local participant identity
@@ -287,14 +287,7 @@ class RemoteAvatarSession:
                 ) from e
             local_participant_identity = room.local_participant.identity
 
-        # Prepare attributes for JWT token
-        attributes: dict[str, str] = {
-            ATTRIBUTE_PUBLISH_ON_BEHALF: local_participant_identity,
-            # "avaluma_license_key": self._license_key,
-            # "avaluma_avatar_id": self._avatar_id,
-        }
-
-        self._avatar_participant_name = f"Avatar-{self._avatar_id}"
+        self._avatar_participant_name = f"avatar-{self._avatar_id}"
         self._avatar_participant_identity = f"avatar-{self._avatar_id}"
 
         livekit_token = (
@@ -304,7 +297,11 @@ class RemoteAvatarSession:
             .with_name(self._avatar_participant_name)
             .with_grants(api.VideoGrants(room_join=True, room=room.name))
             # allow the avatar agent to publish audio and video on behalf of your local agent
-            .with_attributes(attributes)
+            .with_attributes(
+                {
+                    ATTRIBUTE_PUBLISH_ON_BEHALF: local_participant_identity,
+                }
+            )
             .to_jwt()
         )
 
@@ -336,7 +333,6 @@ class RemoteAvatarSession:
         json_data = {
             "livekit_url": livekit_url,
             "livekit_token": livekit_token,
-            "livekit_room_name": room_name,
             "avaluma_license_key": self._license_key,
             "avaluma_avatar_id": self._avatar_id,
         }
@@ -344,7 +340,7 @@ class RemoteAvatarSession:
         for i in range(self._conn_options.max_retry):
             try:
                 async with self._http_session.post(
-                    self._avaluma_server_url + "/v1/livekit/start-avatar",
+                    self._avaluma_server_url + "/livekit/v1/start-avatar",
                     headers={
                         "Content-Type": "application/json",
                         "api-secret": self._license_key,
