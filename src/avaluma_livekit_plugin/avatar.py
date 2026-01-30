@@ -333,14 +333,14 @@ class RemoteAvatarSession:
         json_data = {
             "livekit_url": livekit_url,
             "livekit_token": livekit_token,
-            "avaluma_license_key": self._license_key,
+            "avaluma_key": self._license_key,
             "avaluma_avatar_id": self._avatar_id,
         }
 
         for i in range(self._conn_options.max_retry):
             try:
                 async with self._http_session.post(
-                    self._avaluma_server_url + "/livekit/v1/start-avatar",
+                    self._avaluma_server_url + "/v1/livekit/start-avatar",
                     headers={
                         "Content-Type": "application/json",
                         "api-secret": self._license_key,
