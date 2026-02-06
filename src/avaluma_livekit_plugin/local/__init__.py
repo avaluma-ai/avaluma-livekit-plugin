@@ -32,15 +32,21 @@ if not os.listdir(BINARY_DIR):
 if BINARY_DIR not in sys.path:
     sys.path.insert(0, BINARY_DIR)
 
-# Preload shared libraries using ctypes (works even after Python startup)
+# Configure dynamic linker to find libraries in LIB_DIR
 if os.path.exists(LIB_DIR):
-    # Add to LD_LIBRARY_PATH for reference (informational)
+    # CRITICAL: Set RTLD flags BEFORE any imports to ensure proper symbol resolution
+    # This affects how Python's import system loads C extension modules
+    old_dlopen_flags = sys.getdlopenflags()
+    sys.setdlopenflags(os.RTLD_NOW | os.RTLD_GLOBAL)
+
+    # Add LIB_DIR to the dynamic linker's search path
+    # This must be done before importing the C++ module
     current_ld_path = os.environ.get("LD_LIBRARY_PATH", "")
     if LIB_DIR not in current_ld_path:
         os.environ["LD_LIBRARY_PATH"] = f"{LIB_DIR}:{current_ld_path}"
 
     # Explicitly preload critical shared libraries in dependency order
-    # C++ runtime must be loaded first!
+    # These must be loaded with RTLD_GLOBAL so they're available to the C++ module
     libs_to_preload = [
         "libgcc_s.so.1",  # GCC runtime (load first)
         "libstdc++.so.6",  # C++ standard library (load second)
@@ -52,17 +58,21 @@ if os.path.exists(LIB_DIR):
         "libwebp.so",
         "libx264.so",
         "libcnpy.so",
+        "libtbb.so.2",  # Threading Building Blocks (required by OpenCV)
+        "libopencv_core.so.4.5d",  # OpenCV core (required for BGR conversion)
+        "libopencv_imgproc.so.4.5d",  # OpenCV image processing
     ]
 
     for lib_name in libs_to_preload:
         lib_path = os.path.join(LIB_DIR, lib_name)
         if os.path.exists(lib_path):
             try:
-                ctypes.CDLL(lib_path, mode=ctypes.RTLD_GLOBAL)
+                ctypes.CDLL(lib_path, mode=ctypes.RTLD_GLOBAL | ctypes.RTLD_NOW)
             except Exception as e:
                 print(f"[Avaluma] Warning: Could not preload {lib_name}: {e}")
 
     print(f"[Avaluma] Preloaded shared libraries from {LIB_DIR}")
+    print(f"[Avaluma] LD_LIBRARY_PATH set to: {os.environ.get('LD_LIBRARY_PATH', 'NOT SET')}")
 else:
     logger.error("Lib directory not found at %s", LIB_DIR)
 
