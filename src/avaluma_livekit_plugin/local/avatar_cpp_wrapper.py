@@ -38,7 +38,7 @@ import numpy as np
 from ..log import logger
 
 # A/V Sync Debug Flag - set to True to enable detailed timing logs
-AV_SYNC_DEBUG = False
+AV_SYNC_DEBUG = True
 
 # PERFORMANCE: Single-threaded executor to avoid constant EGL context switching
 # This ensures all C++ calls run on the SAME thread, keeping EGL context bound

@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 try:
     from .avatar_cpp_wrapper import AV_SYNC_DEBUG
 except ImportError:
-    AV_SYNC_DEBUG = False
+    AV_SYNC_DEBUG = True
 
 
 class AvalumaAvatarRunner(AvatarRunner):
@@ -57,8 +57,8 @@ class AvalumaAvatarRunner(AvatarRunner):
             audio_source=self._audio_source,
             video_source=self._video_source,
             video_fps=options.video_fps,
-            video_queue_size_ms=200,  # doubled from 100
-            _max_delay_tolerance_ms=600,  # doubled from 300
+            video_queue_size_ms=1000,  # doubled from 100
+            _max_delay_tolerance_ms=2000,  # doubled from 300
         )
 
     @log_exceptions(logger=logger)
