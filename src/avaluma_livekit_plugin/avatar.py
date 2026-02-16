@@ -326,6 +326,9 @@ class RemoteAvatarSession:
                 wait_remote_track=rtc.TrackKind.KIND_VIDEO,
             )
 
+    async def stop(self):
+        await self._request_remote_avatar_to_stop()
+
     async def _request_remote_avatar_to_join(
         self, livekit_url: str, livekit_token: str, room_name: str
     ):
