@@ -2,16 +2,12 @@
 Avaluma plugin for LiveKit Agents
 """
 
-from .avatar import AvalumaException, LocalAvatarSession, RemoteAvatarSession
-from .legacy_avatar import AvatarSession
-from .local.bin_downloader import BinDownloader
+from .avatar import AvalumaException, AvatarSession
 from .version import __version__
 
 __all__ = [
     "AvalumaException",
     "AvatarSession",
-    "LocalAvatarSession",
-    "RemoteAvatarSession",
     "__version__",
 ]
 
@@ -23,11 +19,6 @@ from .log import logger
 class AvalumaPlugin(Plugin):
     def __init__(self) -> None:
         super().__init__(__name__, __version__, __package__, logger)
-
-    def download_files(self):
-        logger.info("Downloading files for avaluma plugin")
-        BinDownloader()
-        logger.info("Files for avaluma downloaded successfully")
 
 
 Plugin.register_plugin(AvalumaPlugin())
