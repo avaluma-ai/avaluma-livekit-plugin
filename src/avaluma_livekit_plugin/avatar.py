@@ -28,10 +28,15 @@ class AvalumaException(Exception):
 
 
 class AvatarSession:
-    def __init__(self, license_key: str, avatar_id: str, avaluma_server_url: str):
+    def __init__(
+        self,
+        license_key: str,
+        avatar_id: str,
+        avatar_server_url: str = "https://api.avaluma.ai",
+    ):
         self._license_key = license_key
         self._avatar_id = avatar_id
-        self._avaluma_server_url = avaluma_server_url
+        self._avatar_server_url = avatar_server_url
 
         self._conn_options = DEFAULT_API_CONNECT_OPTIONS
         self._http_session = utils.http_context.http_session()
@@ -115,7 +120,7 @@ class AvatarSession:
         for i in range(self._conn_options.max_retry):
             try:
                 async with self._http_session.post(
-                    self._avaluma_server_url + "/v1/livekit/start-avatar",
+                    self._avatar_server_url + "/v1/livekit/start-avatar",
                     headers={
                         "Content-Type": "application/json",
                         "api-secret": self._license_key,
@@ -167,12 +172,12 @@ class AvatarSession:
         if not self._session_id:
             return
 
-        if not self._avaluma_server_url:
+        if not self._avatar_server_url:
             logger.warning("Cannot stop remote avatar: hvi_server_url not set")
             return
 
         # Build stop URL from start URL
-        stop_url = self._avaluma_server_url + "/v1/livekit/stop-avatar"
+        stop_url = self._avatar_server_url + "/v1/livekit/stop-avatar"
 
         logger.debug(f"Stopping remote avatar session: {self._session_id}")
 
