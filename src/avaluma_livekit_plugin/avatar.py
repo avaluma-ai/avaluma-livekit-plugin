@@ -222,7 +222,7 @@ class AvatarSession:
                 print("User is not present (e.g. disconnected)")
 
         @session.on("agent_state_changed")
-        async def on_agent_state_changed(ev: AgentStateChangedEvent):
+        def on_agent_state_changed(ev: AgentStateChangedEvent):
             if ev.new_state == "initializing":
                 print("Agent is starting up")
             elif ev.new_state == "idle":
@@ -234,8 +234,10 @@ class AvatarSession:
             elif ev.new_state == "speaking":
                 print("Agent started speaking")
 
-            await room.local_participant.perform_rpc(
-                destination_identity=self._avatar_participant_identity,
-                method="agent_state_changed",
-                payload=ev.new_state,
+            asyncio.create_task(
+                room.local_participant.perform_rpc(
+                    destination_identity=self._avatar_participant_identity,
+                    method="agent_state_changed",
+                    payload=ev.new_state,
+                )
             )
