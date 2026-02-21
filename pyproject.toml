@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "Avaluma-LiveKit-Plugin"
-version = "0.1.1"
+version = "0.1.4"
 description = "LiveKit Plugin for using LiveKit Agent with Avaluma Avatar. "
 authors = [
     { name = "Avaluma.ai", email = "dev@avaluma.ai" }
@@ -16,6 +16,8 @@ dependencies = [
 "livekit-agents>=1.2.0",
 "aiohttp>=3.9.0",
 "numpy>=1.24.0",
+"nvidia-ml-py>=12.560.30",
+"psutil>=5.9.0",
 ]
 
 [project.urls]

@@ -2,14 +2,8 @@ from __future__ import annotations, print_function
 
 import asyncio
 import os
-import sys
-from collections.abc import AsyncGenerator, AsyncIterator
-from pickle import FRAME
-from re import A
-from typing import TYPE_CHECKING, Literal
 
 import aiohttp
-from aiohttp.client_exceptions import SSLContext
 from livekit import api, rtc
 from livekit.agents import (
     DEFAULT_API_CONNECT_OPTIONS,
@@ -23,15 +17,9 @@ from livekit.agents import (
 )
 from livekit.agents.types import ATTRIBUTE_PUBLISH_ON_BEHALF
 from livekit.agents.voice.avatar import (
-    AvatarOptions,
-    AvatarRunner,
     DataStreamAudioOutput,
-    QueueAudioOutput,
 )
 
-from .local.avatar_cpp_wrapper import AvalumaRuntime
-
-# from PIL import Image
 from .log import logger
 
 
@@ -42,150 +30,30 @@ class AvalumaException(Exception):
 class AvatarSession:
     def __init__(
         self,
-        *,
-        license_key: NotGivenOr[str] = NOT_GIVEN,
-        avatar_id: NotGivenOr[str] = NOT_GIVEN,
-        assets_dir: NotGivenOr[str] = NOT_GIVEN,
-        hvi_server_url: NotGivenOr[str] = NOT_GIVEN,
-        mode: str = "local",
-    ) -> None:
-        """
-        Initialize a Avaluma avatar session.
-
-        Args:
-            license_key: The Avaluma License Key.
-            avatar_id: The avatar ID to use.
-        """
-        self._license_key = license_key or os.getenv("AVALUMA_LICENSE_KEY")
+        license_key: str,
+        avatar_id: str,
+        avatar_server_url: str = "https://api.avaluma.ai",
+    ):
+        self._license_key = license_key
         self._avatar_id = avatar_id
-        self._assets_dir = assets_dir or os.getenv("AVALUMA_ASSETS_DIR")
-        self._avaluma_hvi_server_url = hvi_server_url or os.getenv(
-            "AVALUMA_HVI_SERVER_URL"
-        )
-        self._mode = mode
+        self._avatar_server_url = avatar_server_url
+
         self._conn_options = DEFAULT_API_CONNECT_OPTIONS
-
-        if self._license_key is None:
-            raise AvalumaException("`license_key` or AVALUMA_LICENSE_KEY are required")
-        if self._avatar_id is None:
-            raise AvalumaException("`avatar_id` is required")
-
-        # validate mode-specific requirements
-        if self._mode == "local":
-            if self._assets_dir is None:
-                raise AvalumaException(
-                    "`assets_dir` or AVALUMA_ASSETS_DIR env must be set for local mode"
-                )
-            # TODO: check if local/bin is not empty
-            if not os.path.exists(os.path.join(os.path.dirname(__file__), "local/bin")):
-                raise AvalumaException("local/bin directory not found")
-        elif self._mode == "remote":
-            if self._avaluma_hvi_server_url is None:
-                raise AvalumaException(
-                    "`avaluma_hvi_server_url` or AVALUMA_HVI_SERVER_URL env must be set for remote mode"
-                )
-        else:
-            raise AvalumaException(f"Unknown mode: {self._mode}")
-
-        self._http_session: aiohttp.ClientSession | None = None
-        self._avatar_runner: AvatarRunner | None = None
-        self._runtime = None
+        self._http_session = utils.http_context.http_session()
 
     async def start(
         self,
-        agent_session: AgentSession,
         room: rtc.Room,
-        *,
-        livekit_url: NotGivenOr[str] = NOT_GIVEN,
-        livekit_api_key: NotGivenOr[str] = NOT_GIVEN,
-        livekit_api_secret: NotGivenOr[str] = NOT_GIVEN,
-    ) -> None:
-        if self._mode == "local":
-            await self._start_local(agent_session, room)
-        elif self._mode == "remote":
-            await self._start_remote(
-                agent_session,
-                room,
-                livekit_url=livekit_url,
-                livekit_api_key=livekit_api_key,
-                livekit_api_secret=livekit_api_secret,
-            )
-        else:
-            raise AvalumaException(f"Invalid mode: {self._mode}")
+        agent_session: NotGivenOr[AgentSession] = NOT_GIVEN,
+    ):
+        livekit_url = os.getenv("LIVEKIT_URL") or None
+        livekit_api_key = os.getenv("LIVEKIT_API_KEY") or None
+        livekit_api_secret = os.getenv("LIVEKIT_API_SECRET") or None
 
-    async def _start_local(self, agent_session: AgentSession, room: rtc.Room) -> None:
-        if not self._runtime:
-            if self._assets_dir is None:
-                raise ValueError("assets_dir is not set")
-
-            asset_path = os.path.join(self._assets_dir, f"{self._avatar_id}.hvia")
-
-            kwargs = {
-                "license_key": self._license_key,
-                "avatar_id": self._avatar_id,
-                "asset_path": asset_path,
-            }
-            self._runtime = AvalumaRuntime(**kwargs)
-        else:
-            logger.info("Avaluma runtime already initialized")
-
-        runtime = self._runtime
-
-        from .local import AvalumaVideoGenerator
-
-        video_generator = AvalumaVideoGenerator(runtime)
-
-        try:
-            job_ctx = get_job_context()
-
-            async def _on_shutdown() -> None:
-                runtime.cleanup()
-
-            job_ctx.add_shutdown_callback(_on_shutdown)
-        except RuntimeError:
-            pass
-
-        output_width, output_height = video_generator.video_resolution
-        avatar_options = AvatarOptions(
-            video_width=output_width,
-            video_height=output_height,
-            video_fps=video_generator.video_fps,
-            audio_sample_rate=video_generator.audio_sample_rate,
-            audio_channels=1,
-        )
-
-        audio_buffer = QueueAudioOutput(sample_rate=runtime.settings.INPUT_SAMPLE_RATE)
-        # create avatar runner
-        from .local.avatar_runner import AvalumaAvatarRunner
-
-        self._avatar_runner = AvalumaAvatarRunner(
-            room=room,
-            video_gen=video_generator,
-            audio_recv=audio_buffer,
-            options=avatar_options,
-        )
-        await self._avatar_runner.start()
-
-        agent_session.output.audio = audio_buffer
-
-    async def _start_remote(
-        self,
-        agent_session: AgentSession,
-        room: rtc.Room,
-        *,
-        livekit_url: NotGivenOr[str] = NOT_GIVEN,
-        livekit_api_key: NotGivenOr[str] = NOT_GIVEN,
-        livekit_api_secret: NotGivenOr[str] = NOT_GIVEN,
-    ) -> None:
-        livekit_url = livekit_url or (os.getenv("LIVEKIT_URL") or NOT_GIVEN)
-        livekit_api_key = livekit_api_key or (os.getenv("LIVEKIT_API_KEY") or NOT_GIVEN)
-        livekit_api_secret = livekit_api_secret or (
-            os.getenv("LIVEKIT_API_SECRET") or NOT_GIVEN
-        )
         if not livekit_url or not livekit_api_key or not livekit_api_secret:
             raise AvalumaException(
                 "livekit_url, livekit_api_key, and livekit_api_secret must be set "
-                "by arguments or environment variables"
+                "by environment variables"
             )
 
         # Get local participant identity
@@ -199,14 +67,7 @@ class AvatarSession:
                 ) from e
             local_participant_identity = room.local_participant.identity
 
-        # Prepare attributes for JWT token
-        attributes: dict[str, str] = {
-            ATTRIBUTE_PUBLISH_ON_BEHALF: local_participant_identity,
-            # "avaluma_license_key": self._license_key,
-            # "avaluma_avatar_id": self._avatar_id,
-        }
-
-        self._avatar_participant_name = f"Avatar-{self._avatar_id}"
+        self._avatar_participant_name = f"avatar-{self._avatar_id}"
         self._avatar_participant_identity = f"avatar-{self._avatar_id}"
 
         livekit_token = (
@@ -216,39 +77,50 @@ class AvatarSession:
             .with_name(self._avatar_participant_name)
             .with_grants(api.VideoGrants(room_join=True, room=room.name))
             # allow the avatar agent to publish audio and video on behalf of your local agent
-            .with_attributes(attributes)
+            .with_attributes(
+                {
+                    ATTRIBUTE_PUBLISH_ON_BEHALF: local_participant_identity,
+                }
+            )
             .to_jwt()
         )
 
-        logger.debug("starting avatar session")
         await self._request_remote_avatar_to_join(livekit_url, livekit_token, room.name)
-        agent_session.output.audio = DataStreamAudioOutput(
-            room=room,
-            destination_identity=self._avatar_participant_identity,
-        )
+
+        # Register shutdown callback to stop remote avatar
+        try:
+            job_ctx = get_job_context()
+
+            async def _on_shutdown() -> None:
+                await self._request_remote_avatar_to_stop()
+
+            job_ctx.add_shutdown_callback(_on_shutdown)
+        except RuntimeError:
+            pass
+
+        if agent_session is not None:
+            agent_session.output.audio = DataStreamAudioOutput(
+                room=room,
+                destination_identity=self._avatar_participant_identity,
+                sample_rate=16000,
+                wait_remote_track=rtc.TrackKind.KIND_VIDEO,
+            )
 
     async def _request_remote_avatar_to_join(
         self, livekit_url: str, livekit_token: str, room_name: str
     ):
-        if self._license_key is None:
-            raise ValueError("license_key is not set")
-
         # Prepare JSON data
         json_data = {
             "livekit_url": livekit_url,
             "livekit_token": livekit_token,
-            "livekit_room_name": room_name,
-            "avaluma_license_key": self._license_key,
+            "avaluma_key": self._license_key,
             "avaluma_avatar_id": self._avatar_id,
         }
 
-        assert self._avaluma_hvi_server_url is not None, "api_url is not set"
-        # assert self._api_secret is not None, "api_secret is not set"
-
         for i in range(self._conn_options.max_retry):
             try:
-                async with self._ensure_http_session().post(
-                    self._avaluma_hvi_server_url,
+                async with self._http_session.post(
+                    self._avatar_server_url + "/v1/livekit/start-avatar",
                     headers={
                         "Content-Type": "application/json",
                         "api-secret": self._license_key,
@@ -265,6 +137,19 @@ class AvatarSession:
                             status_code=response.status,
                             body=text,
                         )
+
+                    # Try to get session_id from response
+                    try:
+                        response_data = await response.json()
+                        self._session_id = response_data.get("session_id")
+                        if self._session_id:
+                            logger.debug(
+                                f"Remote avatar session started: {self._session_id}"
+                            )
+                    except Exception:
+                        # Response might not be JSON, that's ok
+                        pass
+
                     return
 
             except Exception as e:
@@ -282,14 +167,38 @@ class AvatarSession:
             "Failed to start Avaluma Avatar Session after all retries"
         )
 
-    def _ensure_http_session(self) -> aiohttp.ClientSession:
-        if self._http_session is None:
-            self._http_session = utils.http_context.http_session()
+    async def _request_remote_avatar_to_stop(self) -> None:
+        """Request the remote avatar to leave the room."""
+        if not self._session_id:
+            return
 
-        return self._http_session
+        if not self._avatar_server_url:
+            logger.warning("Cannot stop remote avatar: hvi_server_url not set")
+            return
 
-    @property
-    def runtime(self) -> AvalumaRuntime:
-        if self._runtime is None:
-            raise AvalumaException("Runtime not initialized")
-        return self._runtime
+        # Build stop URL from start URL
+        stop_url = self._avatar_server_url + "/v1/livekit/stop-avatar"
+
+        logger.debug(f"Stopping remote avatar session: {self._session_id}")
+
+        try:
+            async with self._http_session.post(
+                stop_url,
+                headers={
+                    "Content-Type": "application/json",
+                    "api-secret": self._license_key,
+                },
+                json={"session_id": self._session_id},
+                timeout=aiohttp.ClientTimeout(sock_connect=5.0),
+            ) as response:
+                if not response.ok:
+                    text = await response.text()
+                    logger.warning(
+                        f"Failed to stop remote avatar: {response.status} - {text}"
+                    )
+                else:
+                    logger.debug("Remote avatar session stopped successfully")
+        except Exception as e:
+            logger.warning(f"Error stopping remote avatar: {e}")
+        finally:
+            self._session_id = None
