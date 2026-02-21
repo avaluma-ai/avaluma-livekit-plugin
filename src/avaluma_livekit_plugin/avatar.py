@@ -9,9 +9,11 @@ from livekit.agents import (
     DEFAULT_API_CONNECT_OPTIONS,
     NOT_GIVEN,
     AgentSession,
+    AgentStateChangedEvent,
     APIConnectionError,
     APIStatusError,
     NotGivenOr,
+    UserStateChangedEvent,
     get_job_context,
     utils,
 )
@@ -202,3 +204,33 @@ class AvatarSession:
             logger.warning(f"Error stopping remote avatar: {e}")
         finally:
             self._session_id = None
+
+        # Clear the avatar server URL
+        self._avatar_server_url = None
+
+        # Clear the avatar server URL
+        self._avatar_server_url = None
+
+    def register_turn_taking_event(self, session: AgentSession):
+
+        @session.on("user_state_changed")
+        def on_user_state_changed(ev: UserStateChangedEvent):
+            if ev.new_state == "speaking":
+                print("User started speaking")
+            elif ev.new_state == "listening":
+                print("User stopped speaking")
+            elif ev.new_state == "away":
+                print("User is not present (e.g. disconnected)")
+
+        @session.on("agent_state_changed")
+        def on_agent_state_changed(ev: AgentStateChangedEvent):
+            if ev.new_state == "initializing":
+                print("Agent is starting up")
+            elif ev.new_state == "idle":
+                print("Agent is ready but not processing")
+            elif ev.new_state == "listening":
+                print("Agent is listening for user input")
+            elif ev.new_state == "thinking":
+                print("Agent is processing user input and generating a response")
+            elif ev.new_state == "speaking":
+                print("Agent started speaking")
