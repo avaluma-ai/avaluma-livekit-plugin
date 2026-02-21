@@ -86,7 +86,7 @@ class AvatarSession:
         await self._request_remote_avatar_to_join(livekit_url, livekit_token, room.name)
 
         # Register turn taking event handlers
-        self.register_turn_taking_event(agent_session)
+        self.register_turn_taking_event(agent_session, room)
 
         # Register shutdown callback to stop remote avatar
         try:
