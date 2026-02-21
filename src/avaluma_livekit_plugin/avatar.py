@@ -211,28 +211,37 @@ class AvatarSession:
         self._avatar_server_url = None
 
     def register_turn_taking_event(self, session: AgentSession, room: rtc.Room):
+        
+        # If the agent or user state changes it send the new state to avatar
 
         @session.on("user_state_changed")
         def on_user_state_changed(ev: UserStateChangedEvent):
-            if ev.new_state == "speaking":
-                print("User started speaking")
-            elif ev.new_state == "listening":
-                print("User stopped speaking")
-            elif ev.new_state == "away":
-                print("User is not present (e.g. disconnected)")
+            # if ev.new_state == "speaking":
+            #     print("User started speaking")
+            # elif ev.new_state == "listening":
+            #     print("User stopped speaking")
+            # elif ev.new_state == "away":
+            #     print("User is not present (e.g. disconnected)")
+            asyncio.create_task(
+                room.local_participant.perform_rpc(
+                    destination_identity=self._avatar_participant_identity,
+                    method="user_state_changed",
+                    payload=ev.new_state,
+                )
+            )
 
         @session.on("agent_state_changed")
         def on_agent_state_changed(ev: AgentStateChangedEvent):
-            if ev.new_state == "initializing":
-                print("Agent is starting up")
-            elif ev.new_state == "idle":
-                print("Agent is ready but not processing")
-            elif ev.new_state == "listening":
-                print("Agent is listening for user input")
-            elif ev.new_state == "thinking":
-                print("Agent is processing user input and generating a response")
-            elif ev.new_state == "speaking":
-                print("Agent started speaking")
+            # if ev.new_state == "initializing":
+            #     print("Agent is starting up")
+            # elif ev.new_state == "idle":
+            #     print("Agent is ready but not processing")
+            # elif ev.new_state == "listening":
+            #     print("Agent is listening for user input")
+            # elif ev.new_state == "thinking":
+            #     print("Agent is processing user input and generating a response")
+            # elif ev.new_state == "speaking":
+            #     print("Agent started speaking")
 
             asyncio.create_task(
                 room.local_participant.perform_rpc(
