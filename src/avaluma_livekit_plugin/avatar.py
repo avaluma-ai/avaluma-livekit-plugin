@@ -43,11 +43,7 @@ class AvatarSession:
         self._conn_options = DEFAULT_API_CONNECT_OPTIONS
         self._http_session = utils.http_context.http_session()
 
-    async def start(
-        self,
-        room: rtc.Room,
-        agent_session: NotGivenOr[AgentSession] = NOT_GIVEN,
-    ):
+    async def start(self, room: rtc.Room, agent_session: AgentSession):
         livekit_url = os.getenv("LIVEKIT_URL") or None
         livekit_api_key = os.getenv("LIVEKIT_API_KEY") or None
         livekit_api_secret = os.getenv("LIVEKIT_API_SECRET") or None
@@ -88,6 +84,9 @@ class AvatarSession:
         )
 
         await self._request_remote_avatar_to_join(livekit_url, livekit_token, room.name)
+
+        # Register turn taking event handlers
+        self.register_turn_taking_event(agent_session)
 
         # Register shutdown callback to stop remote avatar
         try:
