@@ -1,4 +1,4 @@
-from __future__ import annotations, print_function
+from __future__ import annotations
 
 import asyncio
 import os
@@ -24,35 +24,78 @@ from livekit.agents.voice.avatar import (
 
 from .log import logger
 
+DEFAULT_API_URL = "https://api.avaluma.ai"
+SAMPLE_RATE = 16000
+
 
 class AvalumaException(Exception):
     """Exception for Avaluma errors"""
 
 
 class AvatarSession:
+    """An Avaluma avatar session"""
+
     def __init__(
         self,
-        license_key: str,
-        avatar_id: str,
-        avatar_server_url: str = "https://api.avaluma.ai",
-    ):
+        *,
+        license_key: NotGivenOr[str] = NOT_GIVEN,
+        avatar_id: NotGivenOr[str] = NOT_GIVEN,
+        avatar_server_url: NotGivenOr[str] = NOT_GIVEN,
+    ) -> None:
+        license_key = license_key or os.getenv("AVALUMA_API_KEY")
+        if not license_key:
+            raise AvalumaException(
+                "license_key must be set either by passing license_key to the "
+                "client or by setting the AVALUMA_API_KEY environment variable"
+            )
+
+        avatar_id = avatar_id or os.getenv("AVALUMA_AVATAR_ID")
+        if not avatar_id:
+            raise AvalumaException(
+                "avatar_id must be set either by passing avatar_id to the client "
+                "or by setting the AVALUMA_AVATAR_ID environment variable"
+            )
+
         self._license_key = license_key
         self._avatar_id = avatar_id
-        self._avatar_server_url = avatar_server_url
-
+        self._avatar_server_url = (
+            avatar_server_url or os.getenv("AVALUMA_API_URL") or DEFAULT_API_URL
+        )
         self._conn_options = DEFAULT_API_CONNECT_OPTIONS
+
+        # the avatar participant identity/name must match what the remote server
+        # creates from the avatar_id, so they are not configurable
+        self._avatar_participant_identity = f"avatar-{avatar_id}"
+        self._avatar_participant_name = f"avatar-{avatar_id}"
+
         self._http_session = utils.http_context.http_session()
+        self._room: rtc.Room | None = None
+        self._session_id: str | None = None
+        # keep strong references to in-flight RPC tasks so they are not
+        # garbage-collected mid-execution (see asyncio.create_task docs)
+        self._rpc_tasks: set[asyncio.Task] = set()
 
-    async def start(self, room: rtc.Room, agent_session: AgentSession):
-        livekit_url = os.getenv("LIVEKIT_URL") or None
-        livekit_api_key = os.getenv("LIVEKIT_API_KEY") or None
-        livekit_api_secret = os.getenv("LIVEKIT_API_SECRET") or None
-
+    async def start(
+        self,
+        agent_session: AgentSession,
+        room: rtc.Room,
+        *,
+        livekit_url: NotGivenOr[str] = NOT_GIVEN,
+        livekit_api_key: NotGivenOr[str] = NOT_GIVEN,
+        livekit_api_secret: NotGivenOr[str] = NOT_GIVEN,
+    ) -> None:
+        livekit_url = livekit_url or (os.getenv("LIVEKIT_URL") or NOT_GIVEN)
+        livekit_api_key = livekit_api_key or (os.getenv("LIVEKIT_API_KEY") or NOT_GIVEN)
+        livekit_api_secret = livekit_api_secret or (
+            os.getenv("LIVEKIT_API_SECRET") or NOT_GIVEN
+        )
         if not livekit_url or not livekit_api_key or not livekit_api_secret:
             raise AvalumaException(
                 "livekit_url, livekit_api_key, and livekit_api_secret must be set "
-                "by environment variables"
+                "by arguments or environment variables"
             )
+
+        self._room = room
 
         # Get local participant identity
         try:
@@ -64,9 +107,6 @@ class AvatarSession:
                     "failed to get local participant identity"
                 ) from e
             local_participant_identity = room.local_participant.identity
-
-        self._avatar_participant_name = f"avatar-{self._avatar_id}"
-        self._avatar_participant_identity = f"avatar-{self._avatar_id}"
 
         livekit_token = (
             api.AccessToken(api_key=livekit_api_key, api_secret=livekit_api_secret)
@@ -83,33 +123,21 @@ class AvatarSession:
             .to_jwt()
         )
 
-        await self._request_remote_avatar_to_join(livekit_url, livekit_token, room.name)
+        await self._request_remote_avatar_to_join(livekit_url, livekit_token)
 
         # Register turn taking event handlers
-        self.register_turn_taking_event(agent_session, room)
+        self._register_turn_taking_events(agent_session)
 
-        # Register shutdown callback to stop remote avatar
-        try:
-            job_ctx = get_job_context()
-
-            async def _on_shutdown() -> None:
-                await self._request_remote_avatar_to_stop()
-
-            job_ctx.add_shutdown_callback(_on_shutdown)
-        except RuntimeError:
-            pass
-
-        if agent_session is not None:
-            agent_session.output.audio = DataStreamAudioOutput(
-                room=room,
-                destination_identity=self._avatar_participant_identity,
-                sample_rate=16000,
-                wait_remote_track=rtc.TrackKind.KIND_VIDEO,
-            )
+        agent_session.output.audio = DataStreamAudioOutput(
+            room=room,
+            destination_identity=self._avatar_participant_identity,
+            sample_rate=SAMPLE_RATE,
+            wait_remote_track=rtc.TrackKind.KIND_VIDEO,
+        )
 
     async def _request_remote_avatar_to_join(
-        self, livekit_url: str, livekit_token: str, room_name: str
-    ):
+        self, livekit_url: str, livekit_token: str
+    ) -> None:
         # Prepare JSON data
         json_data = {
             "livekit_url": livekit_url,
@@ -168,85 +196,34 @@ class AvatarSession:
             "Failed to start Avaluma Avatar Session after all retries"
         )
 
-    async def _request_remote_avatar_to_stop(self) -> None:
-        """Request the remote avatar to leave the room."""
-        if not self._session_id:
-            return
-
-        if not self._avatar_server_url:
-            logger.warning("Cannot stop remote avatar: hvi_server_url not set")
-            return
-
-        # Build stop URL from start URL
-        stop_url = self._avatar_server_url + "/v1/livekit/stop-avatar"
-
-        logger.debug(f"Stopping remote avatar session: {self._session_id}")
-
-        try:
-            async with self._http_session.post(
-                stop_url,
-                headers={
-                    "Content-Type": "application/json",
-                    "api-secret": self._license_key,
-                },
-                json={"session_id": self._session_id},
-                timeout=aiohttp.ClientTimeout(sock_connect=5.0),
-            ) as response:
-                if not response.ok:
-                    text = await response.text()
-                    logger.warning(
-                        f"Failed to stop remote avatar: {response.status} - {text}"
-                    )
-                else:
-                    logger.debug("Remote avatar session stopped successfully")
-        except Exception as e:
-            logger.warning(f"Error stopping remote avatar: {e}")
-        finally:
-            self._session_id = None
-
-        # Clear the avatar server URL
-        self._avatar_server_url = None
-
-        # Clear the avatar server URL
-        self._avatar_server_url = None
-
-    def register_turn_taking_event(self, session: AgentSession, room: rtc.Room):
-        
-        # If the agent or user state changes it send the new state to avatar
+    def _register_turn_taking_events(self, session: AgentSession) -> None:
+        # If the agent or user state changes it sends the new state to the avatar
 
         @session.on("user_state_changed")
-        def on_user_state_changed(ev: UserStateChangedEvent):
-            # if ev.new_state == "speaking":
-            #     print("User started speaking")
-            # elif ev.new_state == "listening":
-            #     print("User stopped speaking")
-            # elif ev.new_state == "away":
-            #     print("User is not present (e.g. disconnected)")
-            asyncio.create_task(
-                room.local_participant.perform_rpc(
-                    destination_identity=self._avatar_participant_identity,
-                    method="user_state_changed",
-                    payload=ev.new_state,
-                )
-            )
+        def on_user_state_changed(ev: UserStateChangedEvent) -> None:
+            # States: ["speaking", "listening", "away"]
+            self._send_state_rpc("user_state_changed", ev.new_state)
 
         @session.on("agent_state_changed")
-        def on_agent_state_changed(ev: AgentStateChangedEvent):
-            # if ev.new_state == "initializing":
-            #     print("Agent is starting up")
-            # elif ev.new_state == "idle":
-            #     print("Agent is ready but not processing")
-            # elif ev.new_state == "listening":
-            #     print("Agent is listening for user input")
-            # elif ev.new_state == "thinking":
-            #     print("Agent is processing user input and generating a response")
-            # elif ev.new_state == "speaking":
-            #     print("Agent started speaking")
+        def on_agent_state_changed(ev: AgentStateChangedEvent) -> None:
+            # States: ["initializing", "idle", "listening", "thinking", "speaking"]
+            self._send_state_rpc("agent_state_changed", ev.new_state)
 
-            asyncio.create_task(
-                room.local_participant.perform_rpc(
-                    destination_identity=self._avatar_participant_identity,
-                    method="agent_state_changed",
-                    payload=ev.new_state,
-                )
+    def _send_state_rpc(self, method: str, state: str) -> None:
+        task = asyncio.create_task(self._perform_state_rpc(method, state))
+        self._rpc_tasks.add(task)
+        task.add_done_callback(self._rpc_tasks.discard)
+
+    async def _perform_state_rpc(self, method: str, payload: str) -> None:
+        if self._room is None:
+            return
+        try:
+            await self._room.local_participant.perform_rpc(
+                destination_identity=self._avatar_participant_identity,
+                method=method,
+                payload=payload,
             )
+        except Exception:
+            # The avatar may not have joined yet, or the RPC method may not be
+            # registered on the avatar side; these failures are non-fatal.
+            logger.debug("failed to send %s RPC to avatar", method, exc_info=True)
