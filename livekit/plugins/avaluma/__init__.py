@@ -1,5 +1,8 @@
-"""
-Avaluma plugin for LiveKit Agents
+"""Avaluma plugin for LiveKit Agents
+
+Support for Avaluma virtual avatars.
+
+See https://avaluma.ai for more information.
 """
 
 from .avatar import AvalumaException, AvatarSession

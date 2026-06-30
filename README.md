@@ -1,17 +1,17 @@
-# Avaluma-Livekit-Plugin
+# livekit-plugins-avaluma
 
 Avaluma avatar plugin for [LiveKit Agents](https://docs.livekit.io/agents/).
 
 ## Installation
 
-Install with pip from git:
+```bash
+pip install livekit-plugins-avaluma
+```
+
+Or directly from git:
 
 ```bash
 pip install git+https://github.com/avaluma-ai/avaluma-livekit-plugin.git
-
-# Or from a local clone:
-# git clone https://github.com/avaluma-ai/avaluma-livekit-plugin.git
-# pip install path/to/avaluma-livekit-plugin
 ```
 
 ## Pre-requisites
@@ -39,7 +39,7 @@ export LIVEKIT_API_SECRET=<your-livekit-api-secret>
 
     - add imports
       ```python
-      from avaluma_livekit_plugin import AvatarSession
+      from livekit.plugins.avaluma import AvatarSession
       from livekit.agents import RoomInputOptions, RoomOutputOptions
       ```
 

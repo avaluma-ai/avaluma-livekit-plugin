@@ -1,27 +1,38 @@
 [build-system]
-requires = ["setuptools>=61.0"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
 [project]
-name = "Avaluma-LiveKit-Plugin"
-version = "0.2.0"
-description = "LiveKit Plugin for using LiveKit Agent with Avaluma Avatar. "
-authors = [
-    { name = "Avaluma.ai", email = "dev@avaluma.ai" }
-]
+name = "livekit-plugins-avaluma"
+dynamic = ["version"]
+description = "LiveKit Agents plugin for Avaluma virtual avatars"
 readme = "README.md"
+license = "Apache-2.0"
 requires-python = ">=3.11"
-dependencies = [
-"livekit>=0.17.0",
-"livekit-agents>=1.2.0",
-"aiohttp>=3.9.0",
+authors = [{ name = "Avaluma.ai", email = "dev@avaluma.ai" }]
+keywords = ["webrtc", "realtime", "audio", "video", "livekit", "avatar", "ai"]
+classifiers = [
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Topic :: Multimedia :: Sound/Audio",
+    "Topic :: Multimedia :: Video",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3 :: Only",
 ]
+dependencies = ["livekit-agents>=1.2.0"]
 
 [project.urls]
 Homepage = "https://avaluma.ai"
+Source = "https://github.com/avaluma-ai/avaluma-livekit-plugin"
 
-[tool.setuptools.packages.find]
-where = ["src"]
+[tool.hatch.version]
+path = "livekit/plugins/avaluma/version.py"
 
-[tool.setuptools.package-data]
-avaluma_livekit_plugin = ["py.typed"]
+[tool.hatch.build.targets.wheel]
+packages = ["livekit"]
+
+[tool.hatch.build.targets.sdist]
+include = ["/livekit"]
